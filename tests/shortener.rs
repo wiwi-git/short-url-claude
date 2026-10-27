@@ -241,3 +241,137 @@ fn rejected_input_does_not_use_up_a_link_number() {
     );
     assert_eq!(shortener.follow("3"), None);
 }
+
+#[test]
+fn shortening_the_same_original_url_again_returns_the_same_short_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+
+    let first = shortener.shorten("https://example.com/a").unwrap();
+    let again = shortener.shorten("https://example.com/a").unwrap();
+
+    assert_eq!(first, "http://localhost:8080/1");
+    assert_eq!(again, "http://localhost:8080/1");
+    assert_eq!(
+        shortener.shorten("https://example.com/b").unwrap(),
+        "http://localhost:8080/2",
+        "다시 Shorten해도 번호를 소모하지 않는다"
+    );
+}
+
+#[test]
+fn notation_differences_in_whitespace_case_and_default_port_give_the_same_short_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+
+    for input in [
+        "https://example.com/a",
+        "  https://example.com/a\t",
+        "HTTPS://Example.COM/a",
+        "https://example.com:443/a",
+        "HTTPS://Example.COM:443/a",
+    ] {
+        assert_eq!(
+            shortener.shorten(input).unwrap(),
+            "http://localhost:8080/1",
+            "input {input:?}"
+        );
+    }
+    for input in ["HTTP://Example.com:80/a", "http://example.com/a"] {
+        assert_eq!(
+            shortener.shorten(input).unwrap(),
+            "http://localhost:8080/2",
+            "input {input:?}"
+        );
+    }
+    assert_eq!(
+        shortener.shorten("https://example.com:8443/a").unwrap(),
+        "http://localhost:8080/3"
+    );
+}
+
+#[test]
+fn path_query_fragment_and_trailing_slash_are_kept_as_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+    let inputs = [
+        "https://example.com",
+        "https://example.com/",
+        "https://example.com/a",
+        "https://example.com/a/",
+        "https://example.com/A",
+        "https://example.com/a?q=1",
+        "https://example.com/a?Q=1",
+        "https://example.com/a#x",
+        "https://example.com/~a",
+        "https://example.com/%7Ea",
+    ];
+
+    for (i, input) in inputs.iter().enumerate() {
+        assert_eq!(
+            shortener.shorten(input).unwrap(),
+            format!("http://localhost:8080/{}", i + 1),
+            "input {input:?}"
+        );
+    }
+    for (i, input) in inputs.iter().enumerate() {
+        assert_eq!(
+            shortener.follow(&(i + 1).to_string()).as_deref(),
+            Some(*input)
+        );
+    }
+}
+
+#[test]
+fn follow_goes_to_the_normalized_original_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+
+    shortener
+        .shorten("  HTTPS://Example.COM:443/Path?Q=A#Frag ")
+        .unwrap();
+    shortener
+        .shorten("HTTP://User:Pw@Example.COM:8080/x")
+        .unwrap();
+
+    assert_eq!(
+        shortener.follow("1").as_deref(),
+        Some("https://example.com/Path?Q=A#Frag")
+    );
+    assert_eq!(
+        shortener.follow("2").as_deref(),
+        Some("http://User:Pw@example.com:8080/x")
+    );
+}
+
+#[test]
+fn concurrent_shortens_of_the_same_original_url_make_one_short_link() {
+    let dir = tempfile::tempdir().unwrap();
+    // 저장소를 먼저 만들어 두고, 스레드마다 같은 파일에 자기 연결을 연다.
+    drop(shortener(&dir));
+    let barrier = std::sync::Barrier::new(16);
+
+    let links: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                scope.spawn(|| {
+                    let own = shortener(&dir);
+                    barrier.wait();
+                    own.shorten("https://example.com/a").unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    assert!(
+        links.iter().all(|link| link == "http://localhost:8080/1"),
+        "{links:?}"
+    );
+    let shortener = shortener(&dir);
+    assert_eq!(shortener.follow("2"), None);
+    assert_eq!(
+        shortener.shorten("https://example.com/b").unwrap(),
+        "http://localhost:8080/2"
+    );
+}

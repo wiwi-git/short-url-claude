@@ -54,7 +54,7 @@ pub use server::Shortener;
 #[cfg(feature = "server")]
 mod server {
     use super::{Rejection, MAX_INPUT_CHARS};
-    use rusqlite::{params, Connection, OptionalExtension};
+    use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
     use std::path::Path;
     use std::sync::Mutex;
     use url::Url;
@@ -92,20 +92,18 @@ mod server {
         }
 
         /// Original URL에 Link Number를 발급하고 Short Link를 돌려준다.
+        /// 이미 줄인 Original URL이면 기존 Link Number를 돌려주고 새 번호를 쓰지 않는다.
         pub fn shorten(&self, input: &str) -> Result<String, Rejection> {
-            self.check(input)?;
-            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            conn.execute(
-                "INSERT INTO short_links (original_url) VALUES (?1)",
-                params![input],
-            )
-            .map_err(|_| Rejection::StorageUnavailable)?;
-            let link_number = conn.last_insert_rowid();
+            let original_url = self.check(input)?;
+            let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let link_number = link_number_of(&mut conn, &original_url)
+                .map_err(|_| Rejection::StorageUnavailable)?;
             Ok(format!("{}/{}", self.base_url, link_number))
         }
 
-        /// 입력이 Original URL로 받아들일 만한지 본다. 거절이면 저장소에 손대지 않는다.
-        fn check(&self, input: &str) -> Result<(), Rejection> {
+        /// 입력이 Original URL로 받아들일 만한지 보고, 받아들이면 정리한 Original URL을 돌려준다.
+        /// 거절이면 저장소에 손대지 않는다.
+        fn check(&self, input: &str) -> Result<String, Rejection> {
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 return Err(Rejection::Empty);
@@ -120,7 +118,7 @@ mod server {
             if self.own_host.is_some() && host_and_port(&url) == self.own_host {
                 return Err(Rejection::SelfAddress);
             }
-            Ok(())
+            Ok(normalize(trimmed, &url))
         }
 
         /// 경로 조각을 Link Number로 읽어 Original URL을 찾는다. 없으면 `None`.
@@ -137,6 +135,70 @@ mod server {
             .ok()
             .flatten()
         }
+    }
+
+    /// URL 정리 규칙: 스킴과 호스트를 소문자로, 기본 포트를 뺀다 (앞뒤 공백은 이미 뗐다).
+    /// 사용자 정보, 경로, 쿼리, 프래그먼트, 끝의 `/`는 입력 그대로 둔다. 그래서
+    /// `https://example.com`과 `https://example.com/`는 다른 Original URL이다.
+    /// `url` 크레이트의 직렬화는 빈 경로에 `/`를 붙이고 퍼센트 인코딩도 하므로 쓰지 않는다.
+    ///
+    /// `scheme://` 꼴이 아니거나(`http:example.com` 등) 역슬래시, 제어 문자가 있어
+    /// 입력 그대로 둘 수 없는 드문 입력만 파서가 다듬은 형태로 저장한다.
+    fn normalize(trimmed: &str, url: &Url) -> String {
+        let scheme = url.scheme();
+        let after_scheme = trimmed
+            .get(scheme.len()..)
+            .and_then(|rest| rest.strip_prefix("://"));
+        let after_scheme = match after_scheme {
+            Some(rest) if !rest.contains('\\') && !rest.chars().any(|c| c.is_control()) => rest,
+            _ => return url.as_str().to_string(),
+        };
+        let authority_end = after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len());
+        let (authority, tail) = after_scheme.split_at(authority_end);
+        let (userinfo, host_and_port) = match authority.rfind('@') {
+            Some(at) => authority.split_at(at + 1),
+            None => ("", authority),
+        };
+        // IPv6 호스트(`[::1]`) 안의 `:`는 포트 구분자가 아니다.
+        let host_end = match host_and_port.rfind(':') {
+            Some(colon) if !host_and_port[colon..].contains(']') => colon,
+            _ => host_and_port.len(),
+        };
+        let (host, port) = host_and_port.split_at(host_end);
+        // 파서가 기본 포트(와 빈 포트)를 `None`으로 읽는다.
+        let port = if url.port().is_some() { port } else { "" };
+        format!("{scheme}://{userinfo}{}{port}{tail}", host.to_lowercase())
+    }
+
+    /// Original URL의 Link Number. 없으면 새로 발급한다.
+    ///
+    /// 읽기와 INSERT를 한 IMMEDIATE 트랜잭션으로 묶어, 같은 파일을 여는 다른 연결과도
+    /// 한 번에 하나씩만 확인하고 넣는다. 유일 제약에 걸린 INSERT도 AUTOINCREMENT 번호를
+    /// 써 버리므로, 충돌을 제약에만 맡기면 번호가 건너뛴다. 그래도 충돌하면 기존 행을 읽는다.
+    fn link_number_of(conn: &mut Connection, original_url: &str) -> rusqlite::Result<i64> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = |tx: &Connection| {
+            tx.query_row(
+                "SELECT link_number FROM short_links WHERE original_url = ?1",
+                params![original_url],
+                |row| row.get(0),
+            )
+        };
+        let link_number = match existing(&tx).optional()? {
+            Some(link_number) => link_number,
+            None => {
+                tx.execute(
+                    "INSERT INTO short_links (original_url) VALUES (?1)
+                     ON CONFLICT (original_url) DO NOTHING",
+                    params![original_url],
+                )?;
+                existing(&tx)?
+            }
+        };
+        tx.commit()?;
+        Ok(link_number)
     }
 
     /// 1부터 시작하는 10진수만 Link Number로 읽는다 (ADR 0001). 앞자리 0과 부호는 받지 않는다.
