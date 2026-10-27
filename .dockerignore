@@ -1,0 +1,9 @@
+target/
+*.db
+*.sqlite
+*.sqlite-*
+.git/
+.scratch/
+.claude/
+.env
+.DS_Store
