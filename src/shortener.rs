@@ -22,8 +22,6 @@ pub enum Rejection {
     TooLong,
     /// 이 서비스 자기 주소다 (호스트와 포트가 서비스 주소와 같다).
     SelfAddress,
-    /// 저장소에 쓰거나 읽지 못했다.
-    StorageUnavailable,
 }
 
 impl std::fmt::Display for Rejection {
@@ -41,15 +39,12 @@ impl std::fmt::Display for Rejection {
                 "주소가 너무 길어요. {MAX_INPUT_CHARS}자까지 줄일 수 있어요"
             ),
             Rejection::SelfAddress => f.write_str("이 서비스의 주소는 줄일 수 없어요"),
-            Rejection::StorageUnavailable => {
-                f.write_str("지금은 줄일 수 없어요. 잠시 뒤 다시 시도해 주세요")
-            }
         }
     }
 }
 
 #[cfg(feature = "server")]
-pub use server::Shortener;
+pub use server::{OpenError, ShortenError, Shortener, StorageError};
 
 #[cfg(feature = "server")]
 mod server {
@@ -62,11 +57,72 @@ mod server {
     pub struct Shortener {
         base_url: String,
         /// 서비스 주소의 호스트와 포트(스킴 기본 포트면 `None`). 자기 주소 판단에 쓴다.
-        own_host: Option<HostAndPort>,
+        own_host: HostAndPort,
         conn: Mutex<Connection>,
     }
 
     type HostAndPort = (String, Option<u16>);
+
+    /// Shorten이 Short Link를 돌려주지 못한 이유.
+    #[derive(Debug, PartialEq)]
+    pub enum ShortenError {
+        /// 입력을 Original URL로 받아들이지 않았다. 사용자가 입력을 고쳐야 한다.
+        Rejected(Rejection),
+        /// 입력은 받아들였지만 저장소에 쓰거나 읽지 못했다.
+        Storage(StorageError),
+    }
+
+    /// Shortener를 열지 못한 이유.
+    #[derive(Debug)]
+    pub enum OpenError {
+        /// 서비스 주소가 호스트가 있는 http(s) URL이 아니다.
+        InvalidBaseUrl(String),
+        /// 저장소 파일을 열거나 준비하지 못했다.
+        Storage(StorageError),
+    }
+
+    impl std::fmt::Display for OpenError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                OpenError::InvalidBaseUrl(base_url) => write!(
+                    f,
+                    "서비스 주소(BASE_URL) {base_url:?}는 호스트가 있는 http:// 또는 https:// 주소여야 해요"
+                ),
+                OpenError::Storage(e) => e.fmt(f),
+            }
+        }
+    }
+
+    impl std::error::Error for OpenError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                OpenError::InvalidBaseUrl(_) => None,
+                OpenError::Storage(e) => Some(e),
+            }
+        }
+    }
+
+    /// 저장소(SQLite)를 쓰거나 읽지 못했다.
+    #[derive(Debug, PartialEq)]
+    pub struct StorageError(rusqlite::Error);
+
+    impl std::fmt::Display for StorageError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "저장소 오류: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for StorageError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    impl From<rusqlite::Error> for StorageError {
+        fn from(e: rusqlite::Error) -> Self {
+            StorageError(e)
+        }
+    }
 
     /// 호스트(소문자)와 기본 포트가 아닌 포트. URL 파서가 호스트를 소문자로, 기본 포트를 `None`으로 만든다.
     fn host_and_port(url: &Url) -> Option<HostAndPort> {
@@ -76,34 +132,51 @@ mod server {
     impl Shortener {
         /// `db_path`의 SQLite 파일을 열고, 없으면 만들어 저장소를 준비한다.
         /// `base_url`은 Short Link 앞부분이며 끝의 `/`는 뗀다.
-        pub fn open(base_url: &str, db_path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-            let conn = Connection::open(db_path)?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS short_links (
-                     link_number  INTEGER PRIMARY KEY AUTOINCREMENT,
-                     original_url TEXT NOT NULL UNIQUE
-                 );",
-            )?;
+        /// `base_url`이 호스트가 있는 http(s) URL이 아니면 저장소를 열지 않고 실패한다.
+        pub fn open(base_url: &str, db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
+            let own_host = Url::parse(base_url)
+                .ok()
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .as_ref()
+                .and_then(host_and_port)
+                .ok_or_else(|| OpenError::InvalidBaseUrl(base_url.to_string()))?;
+            let open_storage = || -> rusqlite::Result<Connection> {
+                let conn = Connection::open(db_path)?;
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS short_links (
+                         link_number  INTEGER PRIMARY KEY AUTOINCREMENT,
+                         original_url TEXT NOT NULL UNIQUE
+                     );",
+                )?;
+                Ok(conn)
+            };
+            let conn = open_storage().map_err(|e| OpenError::Storage(e.into()))?;
             Ok(Self {
                 base_url: base_url.trim_end_matches('/').to_string(),
-                own_host: Url::parse(base_url).ok().as_ref().and_then(host_and_port),
+                own_host,
                 conn: Mutex::new(conn),
             })
         }
 
         /// Original URL에 Link Number를 발급하고 Short Link를 돌려준다.
         /// 이미 줄인 Original URL이면 기존 Link Number를 돌려주고 새 번호를 쓰지 않는다.
-        pub fn shorten(&self, input: &str) -> Result<String, Rejection> {
-            let original_url = self.check(input)?;
-            let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            let link_number = link_number_of(&mut conn, &original_url)
-                .map_err(|_| Rejection::StorageUnavailable)?;
+        pub fn shorten(&self, input: &str) -> Result<String, ShortenError> {
+            let original_url = self
+                .accepted_original_url(input)
+                .map_err(ShortenError::Rejected)?;
+            let link_number = link_number_of(&mut self.conn(), &original_url)
+                .map_err(|e| ShortenError::Storage(e.into()))?;
             Ok(format!("{}/{}", self.base_url, link_number))
+        }
+
+        /// 저장소 연결. 다른 스레드가 잡은 채 패닉했어도 연결 자체는 멀쩡하므로 그대로 쓴다.
+        fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+            self.conn.lock().unwrap_or_else(|e| e.into_inner())
         }
 
         /// 입력이 Original URL로 받아들일 만한지 보고, 받아들이면 정리한 Original URL을 돌려준다.
         /// 거절이면 저장소에 손대지 않는다.
-        fn check(&self, input: &str) -> Result<String, Rejection> {
+        fn accepted_original_url(&self, input: &str) -> Result<String, Rejection> {
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 return Err(Rejection::Empty);
@@ -115,25 +188,28 @@ mod server {
             if !matches!(url.scheme(), "http" | "https") {
                 return Err(Rejection::UnsupportedScheme);
             }
-            if self.own_host.is_some() && host_and_port(&url) == self.own_host {
+            if host_and_port(&url).as_ref() == Some(&self.own_host) {
                 return Err(Rejection::SelfAddress);
             }
             Ok(normalize(trimmed, &url))
         }
 
-        /// 경로 조각을 Link Number로 읽어 Original URL을 찾는다. 없으면 `None`.
-        /// 올바른 Link Number가 아닌 경로 조각(`0`, `007`, `abc`, `+1`, 정수 범위를 넘는 수)도 `None`.
-        pub fn follow(&self, path: &str) -> Option<String> {
-            let link_number = parse_link_number(path)?;
-            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            conn.query_row(
-                "SELECT original_url FROM short_links WHERE link_number = ?1",
-                params![link_number],
-                |row| row.get(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
+        /// 경로 조각 하나를 Link Number로 읽어 Original URL을 찾는다. 없으면 `Ok(None)`.
+        /// 올바른 Link Number가 아닌 경로 조각(`0`, `007`, `abc`, `+1`, 정수 범위를 넘는 수)도
+        /// 저장소를 보지 않고 `Ok(None)`. 저장소를 읽지 못하면 `Err`.
+        pub fn follow(&self, link_number_text: &str) -> Result<Option<String>, StorageError> {
+            let Some(link_number) = parse_link_number(link_number_text) else {
+                return Ok(None);
+            };
+            let original_url = self
+                .conn()
+                .query_row(
+                    "SELECT original_url FROM short_links WHERE link_number = ?1",
+                    params![link_number],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(original_url)
         }
     }
 
@@ -202,11 +278,12 @@ mod server {
     }
 
     /// 1부터 시작하는 10진수만 Link Number로 읽는다 (ADR 0001). 앞자리 0과 부호는 받지 않는다.
-    fn parse_link_number(path: &str) -> Option<i64> {
-        let first = path.bytes().next()?;
-        if !(b'1'..=b'9').contains(&first) || !path.bytes().all(|b| b.is_ascii_digit()) {
+    fn parse_link_number(link_number_text: &str) -> Option<i64> {
+        let first = link_number_text.bytes().next()?;
+        if !(b'1'..=b'9').contains(&first) || !link_number_text.bytes().all(|b| b.is_ascii_digit())
+        {
             return None;
         }
-        path.parse().ok()
+        link_number_text.parse().ok()
     }
 }

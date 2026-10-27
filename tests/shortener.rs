@@ -2,7 +2,7 @@
 
 //! 경계 1: Shortener 모듈. 테스트마다 새 임시 SQLite를 쓴다.
 
-use short_url::shortener::{Rejection, Shortener};
+use short_url::shortener::{OpenError, Rejection, ShortenError, Shortener};
 
 fn shortener(dir: &tempfile::TempDir) -> Shortener {
     Shortener::open("http://localhost:8080", dir.path().join("links.db")).unwrap()
@@ -16,7 +16,10 @@ fn shorten_then_follow_round_trips_to_the_original_url() {
     let short_link = shortener.shorten("https://example.com/a").unwrap();
 
     assert_eq!(short_link, "http://localhost:8080/1");
-    assert_eq!(shortener.follow("1").as_deref(), Some("https://example.com/a"));
+    assert_eq!(
+        shortener.follow("1").unwrap().as_deref(),
+        Some("https://example.com/a")
+    );
 }
 
 #[test]
@@ -41,7 +44,10 @@ fn link_numbers_are_issued_in_order_starting_from_one() {
             "http://localhost:8080/3"
         ]
     );
-    assert_eq!(shortener.follow("2").as_deref(), Some("https://example.com/b"));
+    assert_eq!(
+        shortener.follow("2").unwrap().as_deref(),
+        Some("https://example.com/b")
+    );
 }
 
 #[test]
@@ -62,7 +68,10 @@ fn short_links_survive_reopening_the_storage() {
 
     let reopened = shortener(&dir);
 
-    assert_eq!(reopened.follow("1").as_deref(), Some("https://example.com/a"));
+    assert_eq!(
+        reopened.follow("1").unwrap().as_deref(),
+        Some("https://example.com/a")
+    );
     assert_eq!(
         reopened.shorten("https://example.com/b").unwrap(),
         "http://localhost:8080/2"
@@ -75,7 +84,7 @@ fn follow_finds_nothing_for_a_link_number_never_issued() {
     let shortener = shortener(&dir);
     shortener.shorten("https://example.com/a").unwrap();
 
-    assert_eq!(shortener.follow("2"), None);
+    assert_eq!(shortener.follow("2"), Ok(None));
 }
 
 #[test]
@@ -83,7 +92,9 @@ fn follow_finds_nothing_for_path_segments_that_are_not_link_numbers() {
     let dir = tempfile::tempdir().unwrap();
     let shortener = shortener(&dir);
     for i in 0..7 {
-        shortener.shorten(&format!("https://example.com/{i}")).unwrap();
+        shortener
+            .shorten(&format!("https://example.com/{i}"))
+            .unwrap();
     }
 
     for path in [
@@ -97,9 +108,12 @@ fn follow_finds_nothing_for_path_segments_that_are_not_link_numbers() {
         "-7",
         "99999999999999999999999",
     ] {
-        assert_eq!(shortener.follow(path), None, "path segment {path:?}");
+        assert_eq!(shortener.follow(path), Ok(None), "path segment {path:?}");
     }
-    assert_eq!(shortener.follow("7").as_deref(), Some("https://example.com/6"));
+    assert_eq!(
+        shortener.follow("7").unwrap().as_deref(),
+        Some("https://example.com/6")
+    );
 }
 
 #[test]
@@ -110,7 +124,7 @@ fn shorten_rejects_empty_and_whitespace_only_input() {
     for input in ["", "   ", "\t\n "] {
         assert_eq!(
             shortener.shorten(input),
-            Err(Rejection::Empty),
+            Err(ShortenError::Rejected(Rejection::Empty)),
             "input {input:?}"
         );
     }
@@ -129,7 +143,7 @@ fn shorten_rejects_input_that_is_not_a_url() {
     ] {
         assert_eq!(
             shortener.shorten(input),
-            Err(Rejection::NotAUrl),
+            Err(ShortenError::Rejected(Rejection::NotAUrl)),
             "input {input:?}"
         );
     }
@@ -148,7 +162,7 @@ fn shorten_rejects_schemes_other_than_http_and_https() {
     ] {
         assert_eq!(
             shortener.shorten(input),
-            Err(Rejection::UnsupportedScheme),
+            Err(ShortenError::Rejected(Rejection::UnsupportedScheme)),
             "input {input:?}"
         );
     }
@@ -166,11 +180,11 @@ fn shorten_rejects_input_longer_than_2048_characters_before_trimming() {
 
     assert_eq!(
         shortener.shorten(&url_of_len(2049)),
-        Err(Rejection::TooLong)
+        Err(ShortenError::Rejected(Rejection::TooLong))
     );
     assert_eq!(
         shortener.shorten(&format!("{} ", url_of_len(2048))),
-        Err(Rejection::TooLong)
+        Err(ShortenError::Rejected(Rejection::TooLong))
     );
     assert!(shortener.shorten(&url_of_len(2048)).is_ok());
 }
@@ -187,7 +201,7 @@ fn shorten_rejects_urls_on_the_service_address_host_and_port() {
     ] {
         assert_eq!(
             shortener.shorten(input),
-            Err(Rejection::SelfAddress),
+            Err(ShortenError::Rejected(Rejection::SelfAddress)),
             "input {input:?}"
         );
     }
@@ -212,7 +226,7 @@ fn self_address_check_ignores_default_ports() {
     ] {
         assert_eq!(
             shortener.shorten(input),
-            Err(Rejection::SelfAddress),
+            Err(ShortenError::Rejected(Rejection::SelfAddress)),
             "input {input:?}"
         );
     }
@@ -239,7 +253,7 @@ fn rejected_input_does_not_use_up_a_link_number() {
         shortener.shorten("https://example.com/b").unwrap(),
         "http://localhost:8080/2"
     );
-    assert_eq!(shortener.follow("3"), None);
+    assert_eq!(shortener.follow("3"), Ok(None));
 }
 
 #[test]
@@ -316,7 +330,7 @@ fn path_query_fragment_and_trailing_slash_are_kept_as_typed() {
     }
     for (i, input) in inputs.iter().enumerate() {
         assert_eq!(
-            shortener.follow(&(i + 1).to_string()).as_deref(),
+            shortener.follow(&(i + 1).to_string()).unwrap().as_deref(),
             Some(*input)
         );
     }
@@ -335,11 +349,11 @@ fn follow_goes_to_the_normalized_original_url() {
         .unwrap();
 
     assert_eq!(
-        shortener.follow("1").as_deref(),
+        shortener.follow("1").unwrap().as_deref(),
         Some("https://example.com/Path?Q=A#Frag")
     );
     assert_eq!(
-        shortener.follow("2").as_deref(),
+        shortener.follow("2").unwrap().as_deref(),
         Some("http://User:Pw@example.com:8080/x")
     );
 }
@@ -369,9 +383,67 @@ fn concurrent_shortens_of_the_same_original_url_make_one_short_link() {
         "{links:?}"
     );
     let shortener = shortener(&dir);
-    assert_eq!(shortener.follow("2"), None);
+    assert_eq!(shortener.follow("2"), Ok(None));
     assert_eq!(
         shortener.shorten("https://example.com/b").unwrap(),
         "http://localhost:8080/2"
+    );
+}
+
+/// 열린 Shortener 아래의 저장소 파일을 SQLite가 아닌 내용으로 덮어써 저장소를 못 쓰게 만든다.
+fn break_storage(dir: &tempfile::TempDir) {
+    std::fs::write(dir.path().join("links.db"), vec![b'x'; 4096]).unwrap();
+}
+
+#[test]
+fn shorten_reports_storage_failure_separately_from_rejections() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+    break_storage(&dir);
+
+    assert!(matches!(
+        shortener.shorten("https://example.com/a"),
+        Err(ShortenError::Storage(_))
+    ));
+    assert_eq!(
+        shortener.shorten("ftp://example.com/a"),
+        Err(ShortenError::Rejected(Rejection::UnsupportedScheme)),
+        "거절은 저장소에 손대지 않으므로 그대로 거절이다"
+    );
+}
+
+#[test]
+fn opening_with_a_service_address_that_is_not_an_http_url_fails() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for base_url in [
+        "localhost:8080",
+        "not a url",
+        "",
+        "file:///tmp/x",
+        "http://",
+    ] {
+        assert!(
+            matches!(
+                Shortener::open(base_url, dir.path().join("links.db")),
+                Err(OpenError::InvalidBaseUrl(_))
+            ),
+            "base_url {base_url:?}"
+        );
+    }
+}
+
+#[test]
+fn follow_reports_storage_failure_instead_of_finding_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+    shortener.shorten("https://example.com/a").unwrap();
+    break_storage(&dir);
+
+    assert!(shortener.follow("1").is_err());
+    assert_eq!(
+        shortener.follow("abc"),
+        Ok(None),
+        "Link Number가 아닌 경로 조각은 저장소를 보지 않고 없음이다"
     );
 }

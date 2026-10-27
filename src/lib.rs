@@ -61,7 +61,11 @@ async fn copy_to_clipboard(text: String) {
 /// Shorten 서버 함수가 실패한 이유. 화면은 이 값의 문구를 그대로 보여 준다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ShortenError {
+    /// 입력이 거절됐다 (400).
     Rejected(Rejection),
+    /// 저장소를 쓸 수 없다 (503).
+    StorageUnavailable,
+    /// 서버 함수 호출 자체가 실패했다.
     Server(String),
 }
 
@@ -69,6 +73,9 @@ impl std::fmt::Display for ShortenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ShortenError::Rejected(rejection) => rejection.fmt(f),
+            ShortenError::StorageUnavailable => {
+                f.write_str("지금은 줄일 수 없어요. 잠시 뒤 다시 시도해 주세요")
+            }
             ShortenError::Server(_) => f.write_str("서버와 통신하지 못했어요"),
         }
     }
@@ -85,68 +92,93 @@ impl From<ServerFnError> for ShortenError {
 impl AsStatusCode for ShortenError {
     fn as_status_code(&self) -> StatusCode {
         match self {
-            ShortenError::Rejected(Rejection::StorageUnavailable) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
             ShortenError::Rejected(_) => StatusCode::BAD_REQUEST,
+            ShortenError::StorageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ShortenError::Server(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
 
 #[cfg(feature = "server")]
-type ShortenerExtension = dioxus::server::axum::Extension<std::sync::Arc<shortener::Shortener>>;
+use dioxus::server::axum::{
+    extract::Path,
+    http::header::LOCATION,
+    response::{Html, IntoResponse, Response},
+    routing::get,
+    Extension, Router,
+};
+
+#[cfg(feature = "server")]
+type ShortenerExtension = Extension<std::sync::Arc<shortener::Shortener>>;
 
 /// Original URL을 Shorten해 Short Link를 돌려준다.
 #[post("/api/shorten", shortener: ShortenerExtension)]
 pub async fn shorten(original_url: String) -> Result<String, ShortenError> {
-    shortener
-        .shorten(&original_url)
-        .map_err(ShortenError::Rejected)
+    shortener.shorten(&original_url).map_err(|e| match e {
+        shortener::ShortenError::Rejected(rejection) => ShortenError::Rejected(rejection),
+        shortener::ShortenError::Storage(e) => {
+            dioxus::logger::tracing::error!("Shorten 실패: {e}");
+            ShortenError::StorageUnavailable
+        }
+    })
 }
 
 /// `BASE_URL`(기본 `http://localhost:8080`)과 `DATABASE_PATH`(기본 `short-url.db`)로
 /// Shortener를 연다. 저장소 파일이 없으면 만든다.
 #[cfg(feature = "server")]
-pub fn shortener_from_env() -> Result<shortener::Shortener, rusqlite::Error> {
+pub fn shortener_from_env() -> Result<shortener::Shortener, shortener::OpenError> {
     let base_url =
         std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "short-url.db".to_string());
     shortener::Shortener::open(&base_url, db_path)
 }
 
-/// 서버 라우터. Dioxus 앱(SSR, server function, 정적 자산)에 Follow 라우트 `/{n}`을 더한다.
+/// 서버 라우터. `/`는 첫 화면(SSR), `/{경로 조각 하나}`는 Follow, 그 밖의 주소는 404 페이지다.
+/// `dioxus::server::router`는 모든 GET을 SSR로 받는 fallback을 달기 때문에 쓰지 않고,
+/// 같은 부품(server function, 정적 자산)으로 직접 조립한다.
 #[cfg(feature = "server")]
-pub fn build_router(shortener: shortener::Shortener) -> dioxus::server::axum::Router {
-    use dioxus::server::axum::{routing::get, Extension};
-    dioxus::server::router(App)
-        .route("/{link_number}", get(follow))
+pub fn build_router(shortener: shortener::Shortener) -> Router {
+    use dioxus::server::{render_handler, DioxusRouterExt, FullstackState, ServeConfig};
+    Router::new()
+        .register_server_functions()
+        .serve_static_assets()
+        .route("/", get(render_handler))
+        .route("/{link_number_text}", get(follow))
+        .fallback(not_found)
+        .with_state(FullstackState::new(ServeConfig::new(), App))
         .layer(Extension(std::sync::Arc::new(shortener)))
 }
 
 #[cfg(feature = "server")]
 async fn follow(
-    dioxus::server::axum::Extension(shortener): ShortenerExtension,
-    dioxus::server::axum::extract::Path(path): dioxus::server::axum::extract::Path<String>,
-) -> dioxus::server::axum::response::Response {
-    use dioxus::server::axum::{
-        http::header::LOCATION,
-        response::{Html, IntoResponse},
-    };
-    match shortener.follow(&path) {
-        Some(original_url) => (StatusCode::FOUND, [(LOCATION, original_url)]).into_response(),
-        None => (StatusCode::NOT_FOUND, Html(NOT_FOUND_PAGE)).into_response(),
+    Extension(shortener): ShortenerExtension,
+    Path(link_number_text): Path<String>,
+) -> Response {
+    match shortener.follow(&link_number_text) {
+        Ok(Some(original_url)) => (StatusCode::FOUND, [(LOCATION, original_url)]).into_response(),
+        Ok(None) => not_found().await,
+        Err(e) => {
+            dioxus::logger::tracing::error!("Follow 실패: {e}");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
     }
 }
 
-/// 없는 Short Link나 올바른 Link Number가 아닌 경로에 보여 주는 404 페이지.
 #[cfg(feature = "server")]
-const NOT_FOUND_PAGE: &str = r#"<!DOCTYPE html>
+async fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, Html(not_found_page())).into_response()
+}
+
+/// 없는 Short Link나 올바른 Short Link가 아닌 주소에 보여 주는 404 페이지.
+#[cfg(feature = "server")]
+fn not_found_page() -> String {
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>없는 링크 - short-url</title>
+<title>없는 링크 - {SERVICE_NAME}</title>
 </head>
 <body>
 <main>
@@ -156,4 +188,6 @@ const NOT_FOUND_PAGE: &str = r#"<!DOCTYPE html>
 </main>
 </body>
 </html>
-"#;
+"#
+    )
+}
