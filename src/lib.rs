@@ -128,10 +128,31 @@ async fn follow(
     dioxus::server::axum::Extension(shortener): ShortenerExtension,
     dioxus::server::axum::extract::Path(path): dioxus::server::axum::extract::Path<String>,
 ) -> dioxus::server::axum::response::Response {
-    use dioxus::server::axum::{http::header::LOCATION, response::IntoResponse};
+    use dioxus::server::axum::{
+        http::header::LOCATION,
+        response::{Html, IntoResponse},
+    };
     match shortener.follow(&path) {
         Some(original_url) => (StatusCode::FOUND, [(LOCATION, original_url)]).into_response(),
-        // 404 페이지는 티켓 03에서 만든다.
-        None => StatusCode::NOT_FOUND.into_response(),
+        None => (StatusCode::NOT_FOUND, Html(NOT_FOUND_PAGE)).into_response(),
     }
 }
+
+/// 없는 Short Link나 올바른 Link Number가 아닌 경로에 보여 주는 404 페이지.
+#[cfg(feature = "server")]
+const NOT_FOUND_PAGE: &str = r#"<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>없는 링크 - short-url</title>
+</head>
+<body>
+<main>
+<h1>없는 링크예요</h1>
+<p>이 Short Link는 발급된 적이 없어요. 주소를 다시 확인해 주세요.</p>
+<p><a href="/">첫 화면으로 가서 직접 줄이기</a></p>
+</main>
+</body>
+</html>
+"#;

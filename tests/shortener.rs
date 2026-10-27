@@ -68,3 +68,36 @@ fn short_links_survive_reopening_the_storage() {
         "http://localhost:8080/2"
     );
 }
+
+#[test]
+fn follow_finds_nothing_for_a_link_number_never_issued() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+    shortener.shorten("https://example.com/a").unwrap();
+
+    assert_eq!(shortener.follow("2"), None);
+}
+
+#[test]
+fn follow_finds_nothing_for_path_segments_that_are_not_link_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+    for i in 0..7 {
+        shortener.shorten(&format!("https://example.com/{i}")).unwrap();
+    }
+
+    for path in [
+        "0",
+        "007",
+        "07",
+        "abc",
+        "7a",
+        "",
+        "+7",
+        "-7",
+        "99999999999999999999999",
+    ] {
+        assert_eq!(shortener.follow(path), None, "path segment {path:?}");
+    }
+    assert_eq!(shortener.follow("7").as_deref(), Some("https://example.com/6"));
+}

@@ -71,8 +71,9 @@ mod server {
         }
 
         /// 경로 조각을 Link Number로 읽어 Original URL을 찾는다. 없으면 `None`.
+        /// 올바른 Link Number가 아닌 경로 조각(`0`, `007`, `abc`, `+1`, 정수 범위를 넘는 수)도 `None`.
         pub fn follow(&self, path: &str) -> Option<String> {
-            let link_number: i64 = path.parse().ok()?;
+            let link_number = parse_link_number(path)?;
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.query_row(
                 "SELECT original_url FROM short_links WHERE link_number = ?1",
@@ -83,5 +84,14 @@ mod server {
             .ok()
             .flatten()
         }
+    }
+
+    /// 1부터 시작하는 10진수만 Link Number로 읽는다 (ADR 0001). 앞자리 0과 부호는 받지 않는다.
+    fn parse_link_number(path: &str) -> Option<i64> {
+        let first = path.bytes().next()?;
+        if !(b'1'..=b'9').contains(&first) || !path.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        path.parse().ok()
     }
 }
