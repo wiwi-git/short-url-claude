@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Rust 툴체인이 최신 Dioxus 안정판을 빌드할 수 있는 버전으로 올라가 있다
-- [ ] Dioxus CLI(`dx`)가 설치돼 있다
-- [ ] 저장소 루트에 Dioxus fullstack 프로젝트가 있고, `dx serve`로 `/` 첫 화면이 뜬다
-- [ ] `cargo test`가 (자리표시 테스트라도) 통과한다
-- [ ] `AGENTS.md`에 설치, 개발 서버, 테스트 명령이 적혀 있다
+- [x] Rust 툴체인이 최신 Dioxus 안정판을 빌드할 수 있는 버전으로 올라가 있다
+- [x] Dioxus CLI(`dx`)가 설치돼 있다
+- [x] 저장소 루트에 Dioxus fullstack 프로젝트가 있고, `dx serve`로 `/` 첫 화면이 뜬다
+- [x] `cargo test`가 (자리표시 테스트라도) 통과한다
+- [x] `AGENTS.md`에 설치, 개발 서버, 테스트 명령이 적혀 있다

@@ -1,0 +1,19 @@
+[package]
+name = "short-url"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["fullstack"] }
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+server = ["dioxus/server"]
+
+[dev-dependencies]
+# `cargo test`만으로 서버 라우터 테스트가 돌도록 테스트 빌드에서 server 기능을 켠다.
+short-url = { path = ".", features = ["server"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
