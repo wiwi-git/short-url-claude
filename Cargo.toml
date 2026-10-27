@@ -7,11 +7,12 @@ edition = "2021"
 dioxus = { version = "0.7.10", features = ["fullstack"] }
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+url = { version = "2.5", optional = true }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dioxus/server", "dep:rusqlite"]
+server = ["dioxus/server", "dep:rusqlite", "dep:url"]
 
 [dev-dependencies]
 # `cargo test`만으로 서버 라우터 테스트가 돌도록 테스트 빌드에서 server 기능을 켠다.

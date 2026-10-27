@@ -2,7 +2,7 @@
 
 //! 경계 1: Shortener 모듈. 테스트마다 새 임시 SQLite를 쓴다.
 
-use short_url::shortener::Shortener;
+use short_url::shortener::{Rejection, Shortener};
 
 fn shortener(dir: &tempfile::TempDir) -> Shortener {
     Shortener::open("http://localhost:8080", dir.path().join("links.db")).unwrap()
@@ -100,4 +100,144 @@ fn follow_finds_nothing_for_path_segments_that_are_not_link_numbers() {
         assert_eq!(shortener.follow(path), None, "path segment {path:?}");
     }
     assert_eq!(shortener.follow("7").as_deref(), Some("https://example.com/6"));
+}
+
+#[test]
+fn shorten_rejects_empty_and_whitespace_only_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+
+    for input in ["", "   ", "\t\n "] {
+        assert_eq!(
+            shortener.shorten(input),
+            Err(Rejection::Empty),
+            "input {input:?}"
+        );
+    }
+}
+
+#[test]
+fn shorten_rejects_input_that_is_not_a_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+
+    for input in [
+        "hello world",
+        "example.com/a",
+        "https://",
+        "http://exa mple.com",
+    ] {
+        assert_eq!(
+            shortener.shorten(input),
+            Err(Rejection::NotAUrl),
+            "input {input:?}"
+        );
+    }
+}
+
+#[test]
+fn shorten_rejects_schemes_other_than_http_and_https() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+
+    for input in [
+        "ftp://example.com/a",
+        "javascript:alert(1)",
+        "mailto:someone@example.com",
+        "file:///etc/passwd",
+    ] {
+        assert_eq!(
+            shortener.shorten(input),
+            Err(Rejection::UnsupportedScheme),
+            "input {input:?}"
+        );
+    }
+    assert!(shortener.shorten("HTTP://example.com/a").is_ok());
+}
+
+#[test]
+fn shorten_rejects_input_longer_than_2048_characters_before_trimming() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+    let url_of_len = |len: usize| {
+        let prefix = "https://example.com/";
+        format!("{prefix}{}", "a".repeat(len - prefix.len()))
+    };
+
+    assert_eq!(
+        shortener.shorten(&url_of_len(2049)),
+        Err(Rejection::TooLong)
+    );
+    assert_eq!(
+        shortener.shorten(&format!("{} ", url_of_len(2048))),
+        Err(Rejection::TooLong)
+    );
+    assert!(shortener.shorten(&url_of_len(2048)).is_ok());
+}
+
+#[test]
+fn shorten_rejects_urls_on_the_service_address_host_and_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+
+    for input in [
+        "http://localhost:8080/1",
+        "http://localhost:8080",
+        "https://LocalHost:8080/anything?x=1",
+    ] {
+        assert_eq!(
+            shortener.shorten(input),
+            Err(Rejection::SelfAddress),
+            "input {input:?}"
+        );
+    }
+    for input in [
+        "http://localhost:3000/1",
+        "http://localhost/1",
+        "http://127.0.0.1:8080/1",
+    ] {
+        assert!(shortener.shorten(input).is_ok(), "input {input:?}");
+    }
+}
+
+#[test]
+fn self_address_check_ignores_default_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = Shortener::open("https://sho.rt", dir.path().join("links.db")).unwrap();
+
+    for input in [
+        "https://sho.rt/1",
+        "https://SHO.RT:443/1",
+        "http://sho.rt/1",
+    ] {
+        assert_eq!(
+            shortener.shorten(input),
+            Err(Rejection::SelfAddress),
+            "input {input:?}"
+        );
+    }
+    assert!(shortener.shorten("https://sho.rt:8443/1").is_ok());
+}
+
+#[test]
+fn rejected_input_does_not_use_up_a_link_number() {
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = shortener(&dir);
+    shortener.shorten("https://example.com/a").unwrap();
+
+    for input in [
+        "",
+        "not a url",
+        "ftp://example.com/a",
+        &format!("https://example.com/{}", "a".repeat(2048)),
+        "http://localhost:8080/1",
+    ] {
+        assert!(shortener.shorten(input).is_err(), "input {input:?}");
+    }
+
+    assert_eq!(
+        shortener.shorten("https://example.com/b").unwrap(),
+        "http://localhost:8080/2"
+    );
+    assert_eq!(shortener.follow("3"), None);
 }

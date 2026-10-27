@@ -88,6 +88,7 @@ impl AsStatusCode for ShortenError {
             ShortenError::Rejected(Rejection::StorageUnavailable) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            ShortenError::Rejected(_) => StatusCode::BAD_REQUEST,
             ShortenError::Server(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
