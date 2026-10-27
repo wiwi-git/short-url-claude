@@ -15,7 +15,13 @@ async fn home_page_shows_service_name() {
     std::fs::create_dir_all(&public).unwrap();
     std::env::set_var("DIOXUS_PUBLIC_PATH", &public);
 
-    let app = short_url::build_router();
+    let dir = tempfile::tempdir().unwrap();
+    let shortener = short_url::shortener::Shortener::open(
+        "http://localhost:8080",
+        dir.path().join("links.db"),
+    )
+    .unwrap();
+    let app = short_url::build_router(shortener);
 
     let res = app
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
