@@ -114,7 +114,7 @@ type ShortenerExtension = Extension<std::sync::Arc<shortener::Shortener>>;
 /// Original URL을 Shorten해 Short Link를 돌려준다.
 #[post("/api/shorten", shortener: ShortenerExtension)]
 pub async fn shorten(original_url: String) -> Result<String, ShortenError> {
-    shortener.shorten(&original_url).map_err(|e| match e {
+    shortener.shorten(&original_url).await.map_err(|e| match e {
         shortener::ShortenError::Rejected(rejection) => ShortenError::Rejected(rejection),
         shortener::ShortenError::Storage(e) => {
             dioxus::logger::tracing::error!("Shorten 실패: {e}");
@@ -123,14 +123,19 @@ pub async fn shorten(original_url: String) -> Result<String, ShortenError> {
     })
 }
 
-/// `BASE_URL`(기본 `http://localhost:8080`)과 `DATABASE_PATH`(기본 `short-url.db`)로
-/// Shortener를 연다. 저장소 파일이 없으면 만든다.
+/// `DATABASE_URL`이 없을 때 붙는 로컬 개발용 Postgres (AGENTS.md의 docker 명령으로 띄운다).
 #[cfg(feature = "server")]
-pub fn shortener_from_env() -> Result<shortener::Shortener, shortener::OpenError> {
+pub const LOCAL_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/short_url";
+
+/// `BASE_URL`(기본 `http://localhost:8080`)과 `DATABASE_URL`(기본 [`LOCAL_DATABASE_URL`])로
+/// Shortener를 연다. 테이블이 없으면 만든다. 배포 환경에서는 `DATABASE_URL`을 꼭 설정한다.
+#[cfg(feature = "server")]
+pub async fn shortener_from_env() -> Result<shortener::Shortener, shortener::OpenError> {
     let base_url =
         std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
-    let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "short-url.db".to_string());
-    shortener::Shortener::open(&base_url, db_path)
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| LOCAL_DATABASE_URL.to_string());
+    shortener::Shortener::open(&base_url, &database_url).await
 }
 
 /// 서버 라우터. `/`는 첫 화면(SSR), `/{경로 조각 하나}`는 Follow, 그 밖의 주소는 404 페이지다.
@@ -154,7 +159,7 @@ async fn follow(
     Extension(shortener): ShortenerExtension,
     Path(link_number_text): Path<String>,
 ) -> Response {
-    match shortener.follow(&link_number_text) {
+    match shortener.follow(&link_number_text).await {
         Ok(Some(original_url)) => (StatusCode::FOUND, [(LOCATION, original_url)]).into_response(),
         Ok(None) => not_found().await,
         Err(e) => {

@@ -19,11 +19,10 @@ COPY --from=builder /app/bundle/server /app/server
 COPY --from=builder /app/bundle/public /app/public
 
 # Dioxus 서버는 IP·PORT 환경 변수로 주소를 정한다. 기본 IP가 127.0.0.1이라 컨테이너 밖에서 닿도록 0.0.0.0으로 연다.
-# PORT는 Railway가 넣어 준다. BASE_URL과 DATABASE_PATH는 배포 환경에서 설정한다.
+# PORT는 배포 플랫폼이 넣어 준다. BASE_URL과 DATABASE_URL(Postgres 접속 주소)은 배포 환경에서 설정한다.
+# Postgres TLS는 rustls와 내장 루트 인증서(webpki-roots)를 쓰므로 시스템 인증서 패키지가 필요 없다.
 ENV IP=0.0.0.0 \
-    PORT=8080 \
-    DATABASE_PATH=/data/short-url.db
+    PORT=8080
 
-RUN mkdir -p /data
 EXPOSE 8080
 CMD ["/app/server"]

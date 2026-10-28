@@ -1,7 +1,7 @@
 //! Shortener: Shorten과 Follow 규칙을 화면, HTTP와 떼어 놓은 모듈.
 //!
 //! 공개 인터페이스는 [`Shortener::shorten`]과 [`Shortener::follow`] 두 개뿐이다.
-//! 서비스 주소와 저장소(SQLite 파일)는 생성 시점에 받는다.
+//! 서비스 주소와 저장소(Postgres 접속 주소, ADR 0002)는 생성 시점에 받는다.
 //! [`Rejection`]은 화면에서도 쓰므로 server 기능 없이도 컴파일된다.
 
 use serde::{Deserialize, Serialize};
@@ -49,16 +49,14 @@ pub use server::{OpenError, ShortenError, Shortener, StorageError};
 #[cfg(feature = "server")]
 mod server {
     use super::{Rejection, MAX_INPUT_CHARS};
-    use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-    use std::path::Path;
-    use std::sync::Mutex;
+    use sqlx::postgres::{PgPool, PgPoolOptions};
     use url::Url;
 
     pub struct Shortener {
         base_url: String,
         /// 서비스 주소의 호스트와 포트(스킴 기본 포트면 `None`). 자기 주소 판단에 쓴다.
         own_host: HostAndPort,
-        conn: Mutex<Connection>,
+        pool: PgPool,
     }
 
     type HostAndPort = (String, Option<u16>);
@@ -77,7 +75,7 @@ mod server {
     pub enum OpenError {
         /// 서비스 주소가 호스트가 있는 http(s) URL이 아니다.
         InvalidBaseUrl(String),
-        /// 저장소 파일을 열거나 준비하지 못했다.
+        /// 저장소에 붙거나 테이블을 준비하지 못했다.
         Storage(StorageError),
     }
 
@@ -102,9 +100,16 @@ mod server {
         }
     }
 
-    /// 저장소(SQLite)를 쓰거나 읽지 못했다.
-    #[derive(Debug, PartialEq)]
-    pub struct StorageError(rusqlite::Error);
+    /// 저장소(Postgres)를 쓰거나 읽지 못했다.
+    #[derive(Debug)]
+    pub struct StorageError(sqlx::Error);
+
+    /// 테스트에서 `Result`를 비교할 수 있게 한다. 오류 문구가 같으면 같다고 본다.
+    impl PartialEq for StorageError {
+        fn eq(&self, other: &Self) -> bool {
+            self.0.to_string() == other.0.to_string()
+        }
+    }
 
     impl std::fmt::Display for StorageError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -118,8 +123,8 @@ mod server {
         }
     }
 
-    impl From<rusqlite::Error> for StorageError {
-        fn from(e: rusqlite::Error) -> Self {
+    impl From<sqlx::Error> for StorageError {
+        fn from(e: sqlx::Error) -> Self {
             StorageError(e)
         }
     }
@@ -130,48 +135,36 @@ mod server {
     }
 
     impl Shortener {
-        /// `db_path`의 SQLite 파일을 열고, 없으면 만들어 저장소를 준비한다.
+        /// `database_url`의 Postgres에 붙고, 테이블이 없으면 만들어 저장소를 준비한다.
         /// `base_url`은 Short Link 앞부분이며 끝의 `/`는 뗀다.
-        /// `base_url`이 호스트가 있는 http(s) URL이 아니면 저장소를 열지 않고 실패한다.
-        pub fn open(base_url: &str, db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        /// `base_url`이 호스트가 있는 http(s) URL이 아니면 저장소에 붙지 않고 실패한다.
+        pub async fn open(base_url: &str, database_url: &str) -> Result<Self, OpenError> {
             let own_host = Url::parse(base_url)
                 .ok()
                 .filter(|url| matches!(url.scheme(), "http" | "https"))
                 .as_ref()
                 .and_then(host_and_port)
                 .ok_or_else(|| OpenError::InvalidBaseUrl(base_url.to_string()))?;
-            let open_storage = || -> rusqlite::Result<Connection> {
-                let conn = Connection::open(db_path)?;
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS short_links (
-                         link_number  INTEGER PRIMARY KEY AUTOINCREMENT,
-                         original_url TEXT NOT NULL UNIQUE
-                     );",
-                )?;
-                Ok(conn)
-            };
-            let conn = open_storage().map_err(|e| OpenError::Storage(e.into()))?;
+            let pool = open_storage(database_url)
+                .await
+                .map_err(|e| OpenError::Storage(e.into()))?;
             Ok(Self {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 own_host,
-                conn: Mutex::new(conn),
+                pool,
             })
         }
 
         /// Original URL에 Link Number를 발급하고 Short Link를 돌려준다.
         /// 이미 줄인 Original URL이면 기존 Link Number를 돌려주고 새 번호를 쓰지 않는다.
-        pub fn shorten(&self, input: &str) -> Result<String, ShortenError> {
+        pub async fn shorten(&self, input: &str) -> Result<String, ShortenError> {
             let original_url = self
                 .accepted_original_url(input)
                 .map_err(ShortenError::Rejected)?;
-            let link_number = link_number_of(&mut self.conn(), &original_url)
+            let link_number = link_number_of(&self.pool, &original_url)
+                .await
                 .map_err(|e| ShortenError::Storage(e.into()))?;
             Ok(format!("{}/{}", self.base_url, link_number))
-        }
-
-        /// 저장소 연결. 다른 스레드가 잡은 채 패닉했어도 연결 자체는 멀쩡하므로 그대로 쓴다.
-        fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-            self.conn.lock().unwrap_or_else(|e| e.into_inner())
         }
 
         /// 입력이 Original URL로 받아들일 만한지 보고, 받아들이면 정리한 Original URL을 돌려준다.
@@ -197,18 +190,18 @@ mod server {
         /// 경로 조각 하나를 Link Number로 읽어 Original URL을 찾는다. 없으면 `Ok(None)`.
         /// 올바른 Link Number가 아닌 경로 조각(`0`, `007`, `abc`, `+1`, 정수 범위를 넘는 수)도
         /// 저장소를 보지 않고 `Ok(None)`. 저장소를 읽지 못하면 `Err`.
-        pub fn follow(&self, link_number_text: &str) -> Result<Option<String>, StorageError> {
+        pub async fn follow(
+            &self,
+            link_number_text: &str,
+        ) -> Result<Option<String>, StorageError> {
             let Some(link_number) = parse_link_number(link_number_text) else {
                 return Ok(None);
             };
-            let original_url = self
-                .conn()
-                .query_row(
-                    "SELECT original_url FROM short_links WHERE link_number = ?1",
-                    params![link_number],
-                    |row| row.get(0),
-                )
-                .optional()?;
+            let original_url =
+                sqlx::query_scalar("SELECT original_url FROM short_links WHERE link_number = $1")
+                    .bind(link_number)
+                    .fetch_optional(&self.pool)
+                    .await?;
             Ok(original_url)
         }
     }
@@ -248,32 +241,66 @@ mod server {
         format!("{scheme}://{userinfo}{}{port}{tail}", host.to_lowercase())
     }
 
+    /// Link Number 발급을 한 줄로 세우는 트랜잭션 advisory lock의 키 (임의의 고정값).
+    /// advisory lock은 데이터베이스마다 따로라 다른 데이터베이스와 부딪치지 않는다.
+    const ISSUE_LOCK_KEY: i64 = 0x5348_4f52_545f_5552; // "SHORT_UR"
+
+    /// 저장소에 붙고 테이블이 없으면 만든다. 여러 서버가 동시에 떠도
+    /// `CREATE TABLE IF NOT EXISTS`끼리 부딪치지 않게 발급과 같은 잠금 아래에서 만든다.
+    async fn open_storage(database_url: &str) -> sqlx::Result<PgPool> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(database_url)
+            .await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(ISSUE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS short_links (
+                 link_number  BIGINT PRIMARY KEY,
+                 original_url TEXT NOT NULL UNIQUE
+             )",
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(pool)
+    }
+
     /// Original URL의 Link Number. 없으면 새로 발급한다.
     ///
-    /// 읽기와 INSERT를 한 IMMEDIATE 트랜잭션으로 묶어, 같은 파일을 여는 다른 연결과도
-    /// 한 번에 하나씩만 확인하고 넣는다. 유일 제약에 걸린 INSERT도 AUTOINCREMENT 번호를
-    /// 써 버리므로, 충돌을 제약에만 맡기면 번호가 건너뛴다. 그래도 충돌하면 기존 행을 읽는다.
-    fn link_number_of(conn: &mut Connection, original_url: &str) -> rusqlite::Result<i64> {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing = |tx: &Connection| {
-            tx.query_row(
-                "SELECT link_number FROM short_links WHERE original_url = ?1",
-                params![original_url],
-                |row| row.get(0),
-            )
-        };
-        let link_number = match existing(&tx).optional()? {
+    /// Postgres 시퀀스는 충돌하거나 롤백된 INSERT에서도 값을 써 버려 번호가 건너뛴다(ADR 0002).
+    /// 그래서 시퀀스를 쓰지 않고, 트랜잭션 advisory lock으로 발급을 한 번에 하나씩 세운 뒤
+    /// 기존 행을 찾고, 없으면 지금까지의 가장 큰 번호 다음 번호로 넣는다. 잠금은 커밋이나
+    /// 롤백 때 풀리고, 롤백된 발급은 번호를 남기지 않는다.
+    async fn link_number_of(pool: &PgPool, original_url: &str) -> sqlx::Result<i64> {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(ISSUE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+        let existing: Option<i64> =
+            sqlx::query_scalar("SELECT link_number FROM short_links WHERE original_url = $1")
+                .bind(original_url)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let link_number = match existing {
             Some(link_number) => link_number,
             None => {
-                tx.execute(
-                    "INSERT INTO short_links (original_url) VALUES (?1)
-                     ON CONFLICT (original_url) DO NOTHING",
-                    params![original_url],
-                )?;
-                existing(&tx)?
+                sqlx::query_scalar(
+                    "INSERT INTO short_links (link_number, original_url)
+                     SELECT COALESCE(MAX(link_number), 0) + 1, $1 FROM short_links
+                     RETURNING link_number",
+                )
+                .bind(original_url)
+                .fetch_one(&mut *tx)
+                .await?
             }
         };
-        tx.commit()?;
+        tx.commit().await?;
         Ok(link_number)
     }
 

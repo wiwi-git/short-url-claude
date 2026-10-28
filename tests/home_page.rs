@@ -12,7 +12,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn home_page_shows_service_name() {
-    let (app, _dir) = common::router();
+    let (app, _db) = common::router().await;
 
     let res = app
         .oneshot(Request::get("/").body(Body::empty()).unwrap())

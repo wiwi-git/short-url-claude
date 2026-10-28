@@ -12,7 +12,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn storage_failure_gives_503_for_shorten_and_follow() {
-    let (app, dir) = common::router();
+    let (app, db) = common::router().await;
     let res = app
         .clone()
         .oneshot(
@@ -25,8 +25,8 @@ async fn storage_failure_gives_503_for_shorten_and_follow() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // 열린 저장소 파일을 SQLite가 아닌 내용으로 덮어쓴다.
-    std::fs::write(dir.path().join("links.db"), vec![b'x'; 4096]).unwrap();
+    // 서버가 쓰는 테이블을 지운다.
+    db.break_storage().await;
 
     let res = app
         .clone()

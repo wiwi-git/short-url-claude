@@ -32,7 +32,7 @@ async fn assert_not_found_page(app: &dioxus::server::axum::Router, path: &str) {
 
 #[tokio::test]
 async fn unknown_link_number_and_invalid_path_get_the_404_page() {
-    let (app, _dir) = common::router();
+    let (app, _db) = common::router().await;
 
     for path in ["/1", "/007", "/abc"] {
         assert_not_found_page(&app, path).await;
@@ -41,7 +41,7 @@ async fn unknown_link_number_and_invalid_path_get_the_404_page() {
 
 #[tokio::test]
 async fn paths_with_more_than_one_segment_get_the_404_page() {
-    let (app, _dir) = common::router();
+    let (app, _db) = common::router().await;
 
     for path in ["/a/b", "/1/", "/1/2", "/api", "/api/unknown"] {
         assert_not_found_page(&app, path).await;

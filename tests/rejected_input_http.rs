@@ -12,7 +12,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn shorten_server_function_returns_the_rejection_reason() {
-    let (app, _dir) = common::router();
+    let (app, _db) = common::router().await;
 
     let res = app
         .oneshot(
