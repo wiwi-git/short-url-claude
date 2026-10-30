@@ -19,6 +19,7 @@ const STYLE: &str = r#"
   --link: #2a7f93;
   --link-hover: #1d5f70;
   --accent: linear-gradient(135deg, #3a95a8, #4a7fb5);
+  --title: linear-gradient(135deg, #15586a, #22487a);
   --error: #c8504f;
 }
 @media (prefers-color-scheme: dark) {
@@ -31,6 +32,7 @@ const STYLE: &str = r#"
     --link: #79bccb;
     --link-hover: #a3d4df;
     --accent: linear-gradient(135deg, #3f8e9f, #4d79a8);
+    --title: linear-gradient(135deg, #5fb3c6, #6d9fd6);
     --error: #e07a78;
   }
 }
@@ -50,7 +52,7 @@ main {
 h1 {
   margin: 0 0 28px;
   font-size: 2.4rem;
-  background: var(--accent);
+  background: var(--title);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
