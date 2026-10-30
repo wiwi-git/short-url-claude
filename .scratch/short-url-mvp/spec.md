@@ -74,7 +74,7 @@ Status: ready-for-agent
 - Short Link 수정, 삭제, 만료
 - 원하는 문자열로 Short Link 만들기(커스텀 별칭)
 - 클릭 수 집계, 통계
-- 최근 링크나 목록 화면
+- 목록에 Original URL·만든 시각 표시, 목록 검색과 필터 (Short Link 목록 자체는 티켓 06에서 첫 화면에 추가)
 - 요청 속도 제한 등 남용 방지
 - 배포 (로컬 실행까지만)
 - 악성 URL 검사
