@@ -5,7 +5,7 @@
 mod common;
 
 use common::{shortener, TestDb};
-use short_url::shortener::{OpenError, Rejection, ShortenError, Shortener};
+use short_url::shortener::{OpenError, Rejection, ShortLinkPage, ShortenError, Shortener};
 
 #[tokio::test]
 async fn shorten_then_follow_round_trips_to_the_original_url() {
@@ -63,7 +63,11 @@ async fn short_link_starts_with_the_service_address_without_trailing_slash() {
 #[tokio::test]
 async fn short_links_survive_reopening_the_storage() {
     let db = TestDb::new().await;
-    shortener(&db).await.shorten("https://example.com/a").await.unwrap();
+    shortener(&db)
+        .await
+        .shorten("https://example.com/a")
+        .await
+        .unwrap();
 
     let reopened = shortener(&db).await;
 
@@ -92,7 +96,8 @@ async fn follow_finds_nothing_for_path_segments_that_are_not_link_numbers() {
     let shortener = shortener(&db).await;
     for i in 0..7 {
         shortener
-            .shorten(&format!("https://example.com/{i}")).await
+            .shorten(&format!("https://example.com/{i}"))
+            .await
             .unwrap();
     }
 
@@ -107,7 +112,11 @@ async fn follow_finds_nothing_for_path_segments_that_are_not_link_numbers() {
         "-7",
         "99999999999999999999999",
     ] {
-        assert_eq!(shortener.follow(path).await, Ok(None), "path segment {path:?}");
+        assert_eq!(
+            shortener.follow(path).await,
+            Ok(None),
+            "path segment {path:?}"
+        );
     }
     assert_eq!(
         shortener.follow("7").await.unwrap().as_deref(),
@@ -298,7 +307,10 @@ async fn notation_differences_in_whitespace_case_and_default_port_give_the_same_
         );
     }
     assert_eq!(
-        shortener.shorten("https://example.com:8443/a").await.unwrap(),
+        shortener
+            .shorten("https://example.com:8443/a")
+            .await
+            .unwrap(),
         "http://localhost:8080/3"
     );
 }
@@ -329,7 +341,11 @@ async fn path_query_fragment_and_trailing_slash_are_kept_as_typed() {
     }
     for (i, input) in inputs.iter().enumerate() {
         assert_eq!(
-            shortener.follow(&(i + 1).to_string()).await.unwrap().as_deref(),
+            shortener
+                .follow(&(i + 1).to_string())
+                .await
+                .unwrap()
+                .as_deref(),
             Some(*input)
         );
     }
@@ -341,10 +357,12 @@ async fn follow_goes_to_the_normalized_original_url() {
     let shortener = shortener(&db).await;
 
     shortener
-        .shorten("  HTTPS://Example.COM:443/Path?Q=A#Frag ").await
+        .shorten("  HTTPS://Example.COM:443/Path?Q=A#Frag ")
+        .await
         .unwrap();
     shortener
-        .shorten("HTTP://User:Pw@Example.COM:8080/x").await
+        .shorten("HTTP://User:Pw@Example.COM:8080/x")
+        .await
         .unwrap();
 
     assert_eq!(
@@ -368,7 +386,9 @@ async fn concurrent_shortens_make_one_short_link_per_original_url_without_skippi
             let url = db.url.clone();
             let barrier = barrier.clone();
             tokio::spawn(async move {
-                let own = Shortener::open("http://localhost:8080", &url).await.unwrap();
+                let own = Shortener::open("http://localhost:8080", &url)
+                    .await
+                    .unwrap();
                 barrier.wait().await;
                 let same = own.shorten("https://example.com/same").await.unwrap();
                 let distinct = own
@@ -459,5 +479,91 @@ async fn follow_reports_storage_failure_instead_of_finding_nothing() {
         shortener.follow("abc").await,
         Ok(None),
         "Link Number가 아닌 경로 조각은 저장소를 보지 않고 없음이다"
+    );
+}
+
+#[tokio::test]
+async fn short_link_list_is_empty_before_any_shorten() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+
+    let page = shortener.short_links(0).await.unwrap();
+
+    assert_eq!(
+        page,
+        ShortLinkPage {
+            short_links: vec![],
+            has_next: false
+        }
+    );
+}
+
+#[tokio::test]
+async fn short_link_list_is_newest_first_and_does_not_repeat_reshortened_urls() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    for url in [
+        "https://example.com/a",
+        "https://example.com/b",
+        "https://example.com/a",
+        "https://example.com/c",
+    ] {
+        shortener.shorten(url).await.unwrap();
+    }
+
+    let page = shortener.short_links(0).await.unwrap();
+
+    assert_eq!(
+        page,
+        ShortLinkPage {
+            short_links: vec![
+                "http://localhost:8080/3".to_string(),
+                "http://localhost:8080/2".to_string(),
+                "http://localhost:8080/1".to_string(),
+            ],
+            has_next: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn short_link_list_pages_by_50_and_tells_whether_a_next_page_exists() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    for i in 1..=50 {
+        shortener
+            .shorten(&format!("https://example.com/{i}"))
+            .await
+            .unwrap();
+    }
+
+    let exactly_fifty = shortener.short_links(0).await.unwrap();
+    assert_eq!(exactly_fifty.short_links.len(), 50);
+    assert_eq!(exactly_fifty.short_links[0], "http://localhost:8080/50");
+    assert_eq!(exactly_fifty.short_links[49], "http://localhost:8080/1");
+    assert!(!exactly_fifty.has_next, "딱 50개면 다음 페이지가 없다");
+
+    shortener.shorten("https://example.com/51").await.unwrap();
+
+    let first = shortener.short_links(0).await.unwrap();
+    assert_eq!(first.short_links.len(), 50);
+    assert_eq!(first.short_links[0], "http://localhost:8080/51");
+    assert_eq!(first.short_links[49], "http://localhost:8080/2");
+    assert!(first.has_next, "51개면 다음 페이지가 있다");
+
+    assert_eq!(
+        shortener.short_links(1).await.unwrap(),
+        ShortLinkPage {
+            short_links: vec!["http://localhost:8080/1".to_string()],
+            has_next: false,
+        }
+    );
+    assert_eq!(
+        shortener.short_links(2).await.unwrap(),
+        ShortLinkPage {
+            short_links: vec![],
+            has_next: false
+        },
+        "범위를 넘는 페이지는 빈 페이지"
     );
 }

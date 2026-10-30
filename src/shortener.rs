@@ -1,8 +1,8 @@
 //! Shortener: Shorten과 Follow 규칙을 화면, HTTP와 떼어 놓은 모듈.
 //!
-//! 공개 인터페이스는 [`Shortener::shorten`]과 [`Shortener::follow`] 두 개뿐이다.
+//! 공개 인터페이스는 [`Shortener::shorten`], [`Shortener::follow`], [`Shortener::short_links`]다.
 //! 서비스 주소와 저장소(Postgres 접속 주소, ADR 0002)는 생성 시점에 받는다.
-//! [`Rejection`]은 화면에서도 쓰므로 server 기능 없이도 컴파일된다.
+//! [`Rejection`]과 [`ShortLinkPage`]는 화면에서도 쓰므로 server 기능 없이도 컴파일된다.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,12 +43,23 @@ impl std::fmt::Display for Rejection {
     }
 }
 
+/// Short Link 목록 한 페이지에 담는 Short Link 수.
+pub const SHORT_LINKS_PER_PAGE: u32 = 50;
+
+/// Short Link 목록의 한 페이지. 최신순(가장 큰 Link Number부터)이다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortLinkPage {
+    pub short_links: Vec<String>,
+    /// 이 페이지 뒤에 Short Link가 더 있다.
+    pub has_next: bool,
+}
+
 #[cfg(feature = "server")]
 pub use server::{OpenError, ShortenError, Shortener, StorageError};
 
 #[cfg(feature = "server")]
 mod server {
-    use super::{Rejection, MAX_INPUT_CHARS};
+    use super::{Rejection, ShortLinkPage, MAX_INPUT_CHARS, SHORT_LINKS_PER_PAGE};
     use sqlx::postgres::{PgPool, PgPoolOptions};
     use url::Url;
 
@@ -190,10 +201,7 @@ mod server {
         /// 경로 조각 하나를 Link Number로 읽어 Original URL을 찾는다. 없으면 `Ok(None)`.
         /// 올바른 Link Number가 아닌 경로 조각(`0`, `007`, `abc`, `+1`, 정수 범위를 넘는 수)도
         /// 저장소를 보지 않고 `Ok(None)`. 저장소를 읽지 못하면 `Err`.
-        pub async fn follow(
-            &self,
-            link_number_text: &str,
-        ) -> Result<Option<String>, StorageError> {
+        pub async fn follow(&self, link_number_text: &str) -> Result<Option<String>, StorageError> {
             let Some(link_number) = parse_link_number(link_number_text) else {
                 return Ok(None);
             };
@@ -203,6 +211,29 @@ mod server {
                     .fetch_optional(&self.pool)
                     .await?;
             Ok(original_url)
+        }
+
+        /// 0부터 세는 `page`번째 페이지의 Short Link를 최신순으로 [`SHORT_LINKS_PER_PAGE`]개까지
+        /// 돌려준다. 범위를 넘는 페이지는 빈 페이지다. 저장소를 읽지 못하면 `Err`.
+        pub async fn short_links(&self, page: u32) -> Result<ShortLinkPage, StorageError> {
+            let per_page = i64::from(SHORT_LINKS_PER_PAGE);
+            // 다음 페이지가 있는지 보려고 하나 더 읽는다.
+            let mut link_numbers: Vec<i64> = sqlx::query_scalar(
+                "SELECT link_number FROM short_links ORDER BY link_number DESC LIMIT $1 OFFSET $2",
+            )
+            .bind(per_page + 1)
+            .bind(i64::from(page) * per_page)
+            .fetch_all(&self.pool)
+            .await?;
+            let has_next = link_numbers.len() as i64 > per_page;
+            link_numbers.truncate(SHORT_LINKS_PER_PAGE as usize);
+            Ok(ShortLinkPage {
+                short_links: link_numbers
+                    .into_iter()
+                    .map(|n| format!("{}/{}", self.base_url, n))
+                    .collect(),
+                has_next,
+            })
         }
     }
 

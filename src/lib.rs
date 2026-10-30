@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod shortener;
 
-use shortener::Rejection;
+use shortener::{Rejection, ShortLinkPage};
 
 pub const SERVICE_NAME: &str = "short-url";
 
@@ -12,6 +12,9 @@ pub const SERVICE_NAME: &str = "short-url";
 pub fn App() -> Element {
     let mut original_url = use_signal(String::new);
     let mut outcome = use_signal(|| None::<Result<String, ShortenError>>);
+    // Short Link 목록이 보여 주는 페이지(0부터)와, 줄이기로 새 Short Link가 생겼을 때 목록을 다시 부르는 신호.
+    let mut list_page = use_signal(|| 0u32);
+    let mut list_version = use_signal(|| 0u32);
 
     rsx! {
         document::Title { "{SERVICE_NAME}" }
@@ -20,7 +23,12 @@ pub fn App() -> Element {
             form {
                 onsubmit: move |e| async move {
                     e.prevent_default();
-                    outcome.set(Some(shorten(original_url()).await));
+                    let result = shorten(original_url()).await;
+                    if result.is_ok() {
+                        list_page.set(0);
+                        list_version += 1;
+                    }
+                    outcome.set(Some(result));
                 },
                 input {
                     r#type: "text",
@@ -47,6 +55,65 @@ pub fn App() -> Element {
                 Some(Err(e)) => rsx! { p { class: "error", "{e}" } },
                 None => rsx! {},
             }
+            SuspenseBoundary {
+                fallback: |_| rsx! { p { "단축 링크 목록을 불러오는 중이에요" } },
+                ShortLinkList { page: list_page, version: list_version }
+            }
+        }
+    }
+}
+
+/// 첫 화면 아래의 Short Link 목록. 최신순, 한 페이지 50개, "이전"/"다음"으로 넘긴다 (주소는 그대로).
+#[component]
+fn ShortLinkList(page: Signal<u32>, version: Signal<u32>) -> Element {
+    let list = use_server_future(move || {
+        let page = page();
+        version();
+        short_links(page)
+    })?;
+
+    let content = match list() {
+        Some(Ok(ShortLinkPage {
+            short_links,
+            has_next,
+        })) => {
+            let current = page();
+            rsx! {
+                if short_links.is_empty() {
+                    p { "아직 만든 단축 링크가 없어요" }
+                } else {
+                    ul {
+                        for short_link in short_links {
+                            li { key: "{short_link}", a { href: "{short_link}", "{short_link}" } }
+                        }
+                    }
+                }
+                if current > 0 || has_next {
+                    nav {
+                        button {
+                            r#type: "button",
+                            disabled: current == 0,
+                            onclick: move |_| page -= 1,
+                            "이전"
+                        }
+                        button {
+                            r#type: "button",
+                            disabled: !has_next,
+                            onclick: move |_| page += 1,
+                            "다음"
+                        }
+                    }
+                }
+            }
+        }
+        Some(Err(_)) => rsx! { p { class: "error", "단축 링크 목록을 불러오지 못했어요" } },
+        None => rsx! {},
+    };
+
+    rsx! {
+        section {
+            h2 { "단축 링크 목록" }
+            {content}
         }
     }
 }
@@ -119,6 +186,19 @@ pub async fn shorten(original_url: String) -> Result<String, ShortenError> {
         shortener::ShortenError::Storage(e) => {
             dioxus::logger::tracing::error!("Shorten 실패: {e}");
             ShortenError::StorageUnavailable
+        }
+    })
+}
+
+/// Short Link 목록의 `page`번째 페이지(0부터)를 최신순으로 돌려준다.
+#[post("/api/short-links", shortener: ShortenerExtension)]
+pub async fn short_links(page: u32) -> Result<ShortLinkPage, ServerFnError> {
+    shortener.short_links(page).await.map_err(|e| {
+        dioxus::logger::tracing::error!("Short Link 목록 읽기 실패: {e}");
+        ServerFnError::ServerError {
+            message: "단축 링크 목록을 불러오지 못했어요".to_string(),
+            code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            details: None,
         }
     })
 }
