@@ -8,29 +8,30 @@ use shortener::{Rejection, ShortLinkPage};
 
 pub const SERVICE_NAME: &str = "short-url";
 
-/// 첫 화면 스타일. 가운데 정렬한 한 단 구성에, 링크는 보라-분홍 계열로 밝게 보인다.
+/// 첫 화면 스타일. 가운데 정렬한 한 단 구성에, 눈이 편한 차분한 청록-파랑 계열을 쓴다.
 const STYLE: &str = r#"
 :root {
-  --bg: #faf7ff;
+  --bg: #f5f8f9;
   --card: #ffffff;
-  --text: #2a2340;
-  --muted: #7a7191;
-  --border: #e9e2f7;
-  --link: #8b3dff;
-  --link-hover: #ff3d9a;
-  --accent: linear-gradient(135deg, #8b3dff, #ff3d9a);
-  --error: #e5484d;
+  --text: #24323a;
+  --muted: #6b7c85;
+  --border: #e1e9ec;
+  --link: #2a7f93;
+  --link-hover: #1d5f70;
+  --accent: linear-gradient(135deg, #3a95a8, #4a7fb5);
+  --error: #c8504f;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #15111f;
-    --card: #1f1930;
-    --text: #f1ecff;
-    --muted: #a59cc0;
-    --border: #322a48;
-    --link: #b98cff;
-    --link-hover: #ff7ab8;
-    --error: #ff6b6b;
+    --bg: #141a1d;
+    --card: #1c2428;
+    --text: #e3ebee;
+    --muted: #93a4ab;
+    --border: #2b373c;
+    --link: #79bccb;
+    --link-hover: #a3d4df;
+    --accent: linear-gradient(135deg, #3f8e9f, #4d79a8);
+    --error: #e07a78;
   }
 }
 * { box-sizing: border-box; }
