@@ -8,6 +8,108 @@ use shortener::{Rejection, ShortLinkPage};
 
 pub const SERVICE_NAME: &str = "short-url";
 
+/// 첫 화면 스타일. 가운데 정렬한 한 단 구성에, 링크는 보라-분홍 계열로 밝게 보인다.
+const STYLE: &str = r#"
+:root {
+  --bg: #faf7ff;
+  --card: #ffffff;
+  --text: #2a2340;
+  --muted: #7a7191;
+  --border: #e9e2f7;
+  --link: #8b3dff;
+  --link-hover: #ff3d9a;
+  --accent: linear-gradient(135deg, #8b3dff, #ff3d9a);
+  --error: #e5484d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15111f;
+    --card: #1f1930;
+    --text: #f1ecff;
+    --muted: #a59cc0;
+    --border: #322a48;
+    --link: #b98cff;
+    --link-hover: #ff7ab8;
+    --error: #ff6b6b;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", sans-serif;
+}
+main {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 56px 16px;
+  text-align: center;
+}
+h1 {
+  margin: 0 0 28px;
+  font-size: 2.4rem;
+  background: var(--accent);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+h2 { margin: 0 0 12px; font-size: 1.1rem; color: var(--muted); font-weight: 600; }
+a { color: var(--link); font-weight: 600; text-decoration: none; }
+a:hover { color: var(--link-hover); text-decoration: underline; }
+form { display: flex; gap: 8px; }
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 1rem;
+}
+input:focus { outline: 2px solid var(--link); outline-offset: 1px; }
+button {
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.08); }
+button:disabled { opacity: 0.4; cursor: default; filter: none; }
+.result {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 20px 0 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  word-break: break-all;
+}
+.result button { padding: 8px 14px; font-size: 0.9rem; }
+.error { margin: 16px 0 0; color: var(--error); }
+section {
+  margin-top: 40px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+}
+ul { list-style: none; margin: 0; padding: 0; }
+li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+li:last-child { border-bottom: 0; }
+nav { display: flex; justify-content: center; gap: 8px; margin-top: 16px; }
+nav button { padding: 8px 16px; font-size: 0.9rem; }
+.empty { color: var(--muted); margin: 0; }
+"#;
+
 #[component]
 pub fn App() -> Element {
     let mut original_url = use_signal(String::new);
@@ -18,6 +120,7 @@ pub fn App() -> Element {
 
     rsx! {
         document::Title { "{SERVICE_NAME}" }
+        document::Style { {STYLE} }
         main {
             h1 { "{SERVICE_NAME}" }
             form {
@@ -40,7 +143,7 @@ pub fn App() -> Element {
             }
             match outcome() {
                 Some(Ok(short_link)) => rsx! {
-                    p {
+                    p { class: "result",
                         a { href: "{short_link}", "{short_link}" }
                         button {
                             r#type: "button",
@@ -80,7 +183,7 @@ fn ShortLinkList(page: Signal<u32>, version: Signal<u32>) -> Element {
             let current = page();
             rsx! {
                 if short_links.is_empty() {
-                    p { "아직 만든 단축 링크가 없어요" }
+                    p { class: "empty", "아직 만든 단축 링크가 없어요" }
                 } else {
                     ul {
                         for short_link in short_links {
@@ -264,6 +367,7 @@ fn not_found_page() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>없는 링크 - {SERVICE_NAME}</title>
+<style>{STYLE}</style>
 </head>
 <body>
 <main>
