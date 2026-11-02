@@ -17,6 +17,11 @@ services:
         fromDatabase:
           name: short-url-db
           property: connectionString
+      # 카카오 로그인 키(docs/deploy/render.md). 값은 저장소에 두지 않고 대시보드에서 넣는다.
+      - key: KAKAO_REST_API_KEY
+        sync: false
+      - key: KAKAO_CLIENT_SECRET
+        sync: false
 
 databases:
   - name: short-url-db

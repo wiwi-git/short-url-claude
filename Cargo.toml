@@ -9,11 +9,15 @@ serde = { version = "1", features = ["derive"] }
 # 서버 전용. rustls(webpki 루트 인증서 내장)라 `sslmode=require` 주소도 시스템 인증서 없이 연결한다.
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"], optional = true }
 url = { version = "2.5", optional = true }
+getrandom = { version = "0.3", optional = true }
+serde_json = { version = "1", optional = true }
+# 카카오 로그인(토큰 발급, 사용자 정보 조회) 호출에 쓴다. 서버 전용.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dioxus/server", "dep:sqlx", "dep:url"]
+server = ["dioxus/server", "dep:sqlx", "dep:url", "dep:getrandom", "dep:reqwest", "dep:serde_json"]
 
 [dev-dependencies]
 # `cargo test`만으로 서버 라우터 테스트가 돌도록 테스트 빌드에서 server 기능을 켠다.

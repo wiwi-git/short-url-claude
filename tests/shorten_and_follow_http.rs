@@ -12,13 +12,14 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn shortened_link_follows_to_the_original_url_with_302() {
-    let (app, _db) = common::router().await;
+    let (app, _db, cookie) = common::signed_in_router().await;
 
     let res = app
         .clone()
         .oneshot(
             Request::post("/api/shorten")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
                 .body(Body::from(
                     r#"{"original_url":"https://example.com/a?b=1"}"#,
                 ))

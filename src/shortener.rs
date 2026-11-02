@@ -1,8 +1,8 @@
 //! Shortener: Shorten과 Follow 규칙을 화면, HTTP와 떼어 놓은 모듈.
 //!
-//! 공개 인터페이스는 [`Shortener::shorten`], [`Shortener::follow`], [`Shortener::short_links`]다.
+//! User(카카오 로그인), My Links, Remove, 세션, 통계도 같은 저장소에 두므로 함께 다룬다 (ADR 0003).
 //! 서비스 주소와 저장소(Postgres 접속 주소, ADR 0002)는 생성 시점에 받는다.
-//! [`Rejection`]과 [`ShortLinkPage`]는 화면에서도 쓰므로 server 기능 없이도 컴파일된다.
+//! [`Rejection`], [`ShortLinkPage`], [`Stats`]는 화면에서도 쓰므로 server 기능 없이도 컴파일된다.
 
 use serde::{Deserialize, Serialize};
 
@@ -46,21 +46,49 @@ impl std::fmt::Display for Rejection {
 /// Short Link 목록 한 페이지에 담는 Short Link 수.
 pub const SHORT_LINKS_PER_PAGE: u32 = 50;
 
-/// Short Link 목록의 한 페이지. 최신순(가장 큰 Link Number부터)이다.
+/// 목록에 보여 줄 Short Link 하나. Remove할 때 Link Number를 쓴다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortLink {
+    pub link_number: i64,
+    pub short_link: String,
+}
+
+/// My Links의 한 페이지. 담은 순서의 최신순이다.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortLinkPage {
-    pub short_links: Vec<String>,
+    pub short_links: Vec<ShortLink>,
     /// 이 페이지 뒤에 Short Link가 더 있다.
     pub has_next: bool,
 }
 
+/// 카카오로 로그인한 User. `id`는 이 서비스의 번호이고 카카오 회원번호가 아니다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct User {
+    pub id: i64,
+    pub nickname: String,
+}
+
+/// 서비스 주인이 보는 수. `short_links`는 지금 Follow되는 Short Link 수다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stats {
+    pub users: i64,
+    pub short_links: i64,
+}
+
+/// 로그인 상태(세션)가 유지되는 기간.
+pub const SESSION_DAYS: u64 = 30;
+
 #[cfg(feature = "server")]
-pub use server::{OpenError, ShortenError, Shortener, StorageError};
+pub use server::{random_token, OpenError, ShortenError, Shortener, StorageError};
 
 #[cfg(feature = "server")]
 mod server {
-    use super::{Rejection, ShortLinkPage, MAX_INPUT_CHARS, SHORT_LINKS_PER_PAGE};
+    use super::{
+        Rejection, ShortLink, ShortLinkPage, Stats, User, MAX_INPUT_CHARS, SESSION_DAYS,
+        SHORT_LINKS_PER_PAGE,
+    };
     use sqlx::postgres::{PgPool, PgPoolOptions};
+    use std::time::Duration;
     use url::Url;
 
     pub struct Shortener {
@@ -166,16 +194,126 @@ mod server {
             })
         }
 
-        /// Original URL에 Link Number를 발급하고 Short Link를 돌려준다.
-        /// 이미 줄인 Original URL이면 기존 Link Number를 돌려주고 새 번호를 쓰지 않는다.
-        pub async fn shorten(&self, input: &str) -> Result<String, ShortenError> {
+        /// Short Link 앞부분(끝의 `/`를 뗀 서비스 주소).
+        pub fn base_url(&self) -> &str {
+            &self.base_url
+        }
+
+        /// User가 Original URL을 Shorten한다. Link Number를 발급하고 Short Link를 그 User의
+        /// My Links에 담아 돌려준다. 이미 줄인 Original URL이면 기존 Link Number를 돌려주고
+        /// 새 번호를 쓰지 않는다. 이미 My Links에 있으면 그대로 둔다.
+        pub async fn shorten(&self, user: &User, input: &str) -> Result<String, ShortenError> {
             let original_url = self
                 .accepted_original_url(input)
                 .map_err(ShortenError::Rejected)?;
-            let link_number = link_number_of(&self.pool, &original_url)
+            let link_number = shorten_into_my_links(&self.pool, user.id, &original_url)
                 .await
                 .map_err(|e| ShortenError::Storage(e.into()))?;
-            Ok(format!("{}/{}", self.base_url, link_number))
+            Ok(self.short_link(link_number))
+        }
+
+        fn short_link(&self, link_number: i64) -> String {
+            format!("{}/{}", self.base_url, link_number)
+        }
+
+        /// 카카오 회원번호로 User를 찾거나 만든다. 닉네임은 늘 받은 값으로 바꾼다.
+        pub async fn sign_in(&self, kakao_id: i64, nickname: &str) -> Result<User, StorageError> {
+            let id = sqlx::query_scalar(
+                "INSERT INTO users (kakao_id, nickname) VALUES ($1, $2)
+                 ON CONFLICT (kakao_id) DO UPDATE SET nickname = EXCLUDED.nickname
+                 RETURNING id",
+            )
+            .bind(kakao_id)
+            .bind(nickname)
+            .fetch_one(&self.pool)
+            .await?;
+            Ok(User {
+                id,
+                nickname: nickname.to_string(),
+            })
+        }
+
+        /// User의 세션을 [`SESSION_DAYS`]일 동안 열고, 쿠키에 넣을 토큰을 돌려준다.
+        pub async fn start_session(&self, user: &User) -> Result<String, StorageError> {
+            self.start_session_lasting(user, Duration::from_secs(SESSION_DAYS * 24 * 60 * 60))
+                .await
+        }
+
+        /// [`Shortener::start_session`]과 같되 유지 기간을 정한다. 만료를 확인하는 테스트에서 쓴다.
+        pub async fn start_session_lasting(
+            &self,
+            user: &User,
+            lifetime: Duration,
+        ) -> Result<String, StorageError> {
+            let token = random_token();
+            sqlx::query(
+                "INSERT INTO sessions (token, user_id, expires_at)
+                 VALUES ($1, $2, now() + make_interval(secs => $3))",
+            )
+            .bind(&token)
+            .bind(user.id)
+            .bind(lifetime.as_secs_f64())
+            .execute(&self.pool)
+            .await?;
+            Ok(token)
+        }
+
+        /// 세션 토큰의 User. 없거나 만료된 세션이면 `Ok(None)`.
+        pub async fn user_for_session(&self, token: &str) -> Result<Option<User>, StorageError> {
+            let row: Option<(i64, String)> = sqlx::query_as(
+                "SELECT users.id, users.nickname FROM sessions
+                 JOIN users ON users.id = sessions.user_id
+                 WHERE sessions.token = $1 AND sessions.expires_at > now()",
+            )
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await?;
+            Ok(row.map(|(id, nickname)| User { id, nickname }))
+        }
+
+        /// 세션을 닫는다(로그아웃). 없는 토큰이면 아무 일도 하지 않는다.
+        pub async fn end_session(&self, token: &str) -> Result<(), StorageError> {
+            sqlx::query("DELETE FROM sessions WHERE token = $1")
+                .bind(token)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        }
+
+        /// User의 My Links에서 Short Link를 뺀다. 그 Short Link를 담은 User가 더는 없으면
+        /// Short Link도 지운다(그 번호는 다시 쓰지 않는다). 내 My Links에 없는 번호면 아무 일도 하지 않는다.
+        pub async fn remove(&self, user: &User, link_number: i64) -> Result<(), StorageError> {
+            let mut tx = self.pool.begin().await?;
+            // Shorten이 같은 Short Link를 동시에 다시 담는 것과 엇갈리지 않게 발급과 같은 잠금을 잡는다.
+            lock_issuing(&mut tx).await?;
+            let removed =
+                sqlx::query("DELETE FROM my_links WHERE user_id = $1 AND link_number = $2")
+                    .bind(user.id)
+                    .bind(link_number)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+            if removed > 0 {
+                sqlx::query(
+                    "DELETE FROM short_links WHERE link_number = $1
+                     AND NOT EXISTS (SELECT 1 FROM my_links WHERE link_number = $1)",
+                )
+                .bind(link_number)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+
+        /// 한 번이라도 로그인한 User 수와 지금 Follow되는 Short Link 수.
+        pub async fn stats(&self) -> Result<Stats, StorageError> {
+            let (users, short_links) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM short_links)",
+            )
+            .fetch_one(&self.pool)
+            .await?;
+            Ok(Stats { users, short_links })
         }
 
         /// 입력이 Original URL로 받아들일 만한지 보고, 받아들이면 정리한 Original URL을 돌려준다.
@@ -213,14 +351,20 @@ mod server {
             Ok(original_url)
         }
 
-        /// 0부터 세는 `page`번째 페이지의 Short Link를 최신순으로 [`SHORT_LINKS_PER_PAGE`]개까지
-        /// 돌려준다. 범위를 넘는 페이지는 빈 페이지다. 저장소를 읽지 못하면 `Err`.
-        pub async fn short_links(&self, page: u32) -> Result<ShortLinkPage, StorageError> {
+        /// User의 My Links에서 0부터 세는 `page`번째 페이지를 담은 순서의 최신순으로
+        /// [`SHORT_LINKS_PER_PAGE`]개까지 돌려준다. 범위를 넘는 페이지는 빈 페이지다.
+        pub async fn my_links(
+            &self,
+            user: &User,
+            page: u32,
+        ) -> Result<ShortLinkPage, StorageError> {
             let per_page = i64::from(SHORT_LINKS_PER_PAGE);
             // 다음 페이지가 있는지 보려고 하나 더 읽는다.
             let mut link_numbers: Vec<i64> = sqlx::query_scalar(
-                "SELECT link_number FROM short_links ORDER BY link_number DESC LIMIT $1 OFFSET $2",
+                "SELECT link_number FROM my_links WHERE user_id = $1
+                 ORDER BY added_at DESC, link_number DESC LIMIT $2 OFFSET $3",
             )
+            .bind(user.id)
             .bind(per_page + 1)
             .bind(i64::from(page) * per_page)
             .fetch_all(&self.pool)
@@ -230,7 +374,10 @@ mod server {
             Ok(ShortLinkPage {
                 short_links: link_numbers
                     .into_iter()
-                    .map(|n| format!("{}/{}", self.base_url, n))
+                    .map(|link_number| ShortLink {
+                        link_number,
+                        short_link: self.short_link(link_number),
+                    })
                     .collect(),
                 has_next,
             })
@@ -278,6 +425,9 @@ mod server {
 
     /// 저장소에 붙고 테이블이 없으면 만든다. 여러 서버가 동시에 떠도
     /// `CREATE TABLE IF NOT EXISTS`끼리 부딪치지 않게 발급과 같은 잠금 아래에서 만든다.
+    ///
+    /// 번호 발급 상태 표(`link_number_issuer`)가 아직 없으면 로그인 기능 전의 저장소다.
+    /// 그때 한 번만 주인 없는 Short Link를 모두 지우고 번호를 1부터 다시 시작한다 (ADR 0003).
     async fn open_storage(database_url: &str) -> sqlx::Result<PgPool> {
         let pool = PgPoolOptions::new()
             .max_connections(5)
@@ -285,34 +435,76 @@ mod server {
             .connect(database_url)
             .await?;
         let mut tx = pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(ISSUE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        lock_issuing(&mut tx).await?;
+        let issuer_exists: bool =
+            sqlx::query_scalar("SELECT to_regclass('link_number_issuer') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await?;
         sqlx::raw_sql(
             "CREATE TABLE IF NOT EXISTS short_links (
                  link_number  BIGINT PRIMARY KEY,
                  original_url TEXT NOT NULL UNIQUE
-             )",
+             );
+             CREATE TABLE IF NOT EXISTS link_number_issuer (
+                 only_row    BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (only_row),
+                 last_issued BIGINT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS users (
+                 id         BIGSERIAL PRIMARY KEY,
+                 kakao_id   BIGINT NOT NULL UNIQUE,
+                 nickname   TEXT NOT NULL,
+                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+             );
+             CREATE TABLE IF NOT EXISTS my_links (
+                 user_id     BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                 link_number BIGINT NOT NULL REFERENCES short_links (link_number) ON DELETE CASCADE,
+                 added_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                 PRIMARY KEY (user_id, link_number)
+             );
+             CREATE INDEX IF NOT EXISTS my_links_link_number ON my_links (link_number);
+             CREATE TABLE IF NOT EXISTS sessions (
+                 token      TEXT PRIMARY KEY,
+                 user_id    BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                 expires_at TIMESTAMPTZ NOT NULL
+             );",
         )
         .execute(&mut *tx)
         .await?;
+        if !issuer_exists {
+            sqlx::query("DELETE FROM short_links")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO link_number_issuer (last_issued) VALUES (0)")
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(pool)
     }
 
-    /// Original URL의 Link Number. 없으면 새로 발급한다.
+    /// 발급을 한 번에 하나씩 세우는 트랜잭션 advisory lock을 잡는다. 커밋이나 롤백 때 풀린다.
+    async fn lock_issuing(tx: &mut sqlx::PgConnection) -> sqlx::Result<()> {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(ISSUE_LOCK_KEY)
+            .execute(tx)
+            .await?;
+        Ok(())
+    }
+
+    /// Original URL의 Link Number를 찾거나 새로 발급하고, User의 My Links에 담는다.
     ///
     /// Postgres 시퀀스는 충돌하거나 롤백된 INSERT에서도 값을 써 버려 번호가 건너뛴다(ADR 0002).
     /// 그래서 시퀀스를 쓰지 않고, 트랜잭션 advisory lock으로 발급을 한 번에 하나씩 세운 뒤
-    /// 기존 행을 찾고, 없으면 지금까지의 가장 큰 번호 다음 번호로 넣는다. 잠금은 커밋이나
-    /// 롤백 때 풀리고, 롤백된 발급은 번호를 남기지 않는다.
-    async fn link_number_of(pool: &PgPool, original_url: &str) -> sqlx::Result<i64> {
+    /// 기존 행을 찾고, 없으면 지금까지 발급한 가장 큰 번호(`link_number_issuer`) 다음 번호로 넣는다.
+    /// Short Link가 지워져도 발급한 가장 큰 번호는 줄지 않아 번호를 다시 쓰지 않는다(ADR 0003).
+    /// 롤백된 발급은 번호를 남기지 않는다.
+    async fn shorten_into_my_links(
+        pool: &PgPool,
+        user_id: i64,
+        original_url: &str,
+    ) -> sqlx::Result<i64> {
         let mut tx = pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(ISSUE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        lock_issuing(&mut tx).await?;
         let existing: Option<i64> =
             sqlx::query_scalar("SELECT link_number FROM short_links WHERE original_url = $1")
                 .bind(original_url)
@@ -321,18 +513,37 @@ mod server {
         let link_number = match existing {
             Some(link_number) => link_number,
             None => {
-                sqlx::query_scalar(
-                    "INSERT INTO short_links (link_number, original_url)
-                     SELECT COALESCE(MAX(link_number), 0) + 1, $1 FROM short_links
-                     RETURNING link_number",
+                let link_number: i64 = sqlx::query_scalar(
+                    "UPDATE link_number_issuer SET last_issued = last_issued + 1
+                     RETURNING last_issued",
                 )
-                .bind(original_url)
                 .fetch_one(&mut *tx)
-                .await?
+                .await?;
+                sqlx::query("INSERT INTO short_links (link_number, original_url) VALUES ($1, $2)")
+                    .bind(link_number)
+                    .bind(original_url)
+                    .execute(&mut *tx)
+                    .await?;
+                link_number
             }
         };
+        sqlx::query(
+            "INSERT INTO my_links (user_id, link_number) VALUES ($1, $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(link_number)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(link_number)
+    }
+
+    /// 추측할 수 없는 256비트 무작위 값(16진수). 세션 토큰과 로그인 state에 쓴다.
+    pub fn random_token() -> String {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).expect("운영체제 난수를 읽지 못했어요");
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// 1부터 시작하는 10진수만 Link Number로 읽는다 (ADR 0001). 앞자리 0과 부호는 받지 않는다.

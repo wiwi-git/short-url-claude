@@ -12,12 +12,13 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn storage_failure_gives_503_for_shorten_and_follow() {
-    let (app, db) = common::router().await;
+    let (app, db, cookie) = common::signed_in_router().await;
     let res = app
         .clone()
         .oneshot(
             Request::post("/api/shorten")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
                 .body(Body::from(r#"{"original_url":"https://example.com/a"}"#))
                 .unwrap(),
         )
@@ -33,6 +34,7 @@ async fn storage_failure_gives_503_for_shorten_and_follow() {
         .oneshot(
             Request::post("/api/shorten")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
                 .body(Body::from(r#"{"original_url":"https://example.com/b"}"#))
                 .unwrap(),
         )

@@ -4,9 +4,11 @@
 
 use dioxus::server::axum::{body::Body, http::Response, Router};
 use http_body_util::BodyExt;
-use short_url::shortener::Shortener;
+use short_url::kakao::{BoxFuture, Kakao, KakaoProfile};
+use short_url::shortener::{Shortener, User};
 use sqlx::{Connection, PgConnection};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// `TEST_DATABASE_URL`이 없을 때 붙는 로컬 Postgres (AGENTS.md의 docker 명령으로 띄운다).
 const DEFAULT_TEST_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/short_url";
@@ -42,13 +44,17 @@ impl TestDb {
             .await
             .unwrap();
         let url = with_database(&admin_url, &name);
-        TestDb { url, name, admin_url }
+        TestDb {
+            url,
+            name,
+            admin_url,
+        }
     }
 
     /// 열린 Shortener 아래의 테이블을 지워 저장소를 못 쓰게 만든다.
     pub async fn break_storage(&self) {
         let mut conn = PgConnection::connect(&self.url).await.unwrap();
-        sqlx::raw_sql("DROP TABLE short_links")
+        sqlx::raw_sql("DROP TABLE short_links CASCADE")
             .execute(&mut conn)
             .await
             .unwrap();
@@ -94,7 +100,9 @@ fn with_database(url: &str, name: &str) -> String {
 
 /// 서비스 주소 `http://localhost:8080`으로 새 데이터베이스에 연 Shortener.
 pub async fn shortener(db: &TestDb) -> Shortener {
-    Shortener::open("http://localhost:8080", &db.url).await.unwrap()
+    Shortener::open("http://localhost:8080", &db.url)
+        .await
+        .unwrap()
 }
 
 /// 새 데이터베이스를 붙인 실제 서버 라우터. 돌려준 `TestDb`가 살아 있는 동안 저장소가 남는다.
@@ -104,6 +112,19 @@ pub async fn router() -> (Router, TestDb) {
     (router, db)
 }
 
+/// 새 데이터베이스를 붙인 실제 서버 라우터와, 테스트 User로 로그인한 세션의 `Cookie` 헤더 값.
+pub async fn signed_in_router() -> (Router, TestDb, String) {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    let cookie = session_cookie(&shortener, &user(&shortener).await).await;
+    (router_with(shortener), db, cookie)
+}
+
+/// User의 세션을 열어 `Cookie` 헤더 값(`session=...`)을 돌려준다.
+pub async fn session_cookie(shortener: &Shortener, user: &User) -> String {
+    format!("session={}", shortener.start_session(user).await.unwrap())
+}
+
 /// 주어진 Shortener로 서버 라우터를 만든다.
 pub fn router_with(shortener: Shortener) -> Router {
     // dx 없이 실행하면 실행 파일 옆에 public/ 이 없어 dioxus가 패닉한다.
@@ -111,7 +132,34 @@ pub fn router_with(shortener: Shortener) -> Router {
     let public = std::env::temp_dir().join("short-url-test-public");
     std::fs::create_dir_all(&public).unwrap();
     std::env::set_var("DIOXUS_PUBLIC_PATH", &public);
-    short_url::build_router(shortener)
+    short_url::build_router(shortener, Arc::new(FakeKakao))
+}
+
+/// 테스트용 User(카카오 회원번호 1, 닉네임 "테스터").
+pub async fn user(shortener: &Shortener) -> User {
+    shortener.sign_in(1, "테스터").await.unwrap()
+}
+
+/// 카카오 서버 대신 쓰는 가짜. 인가 코드 `"{회원번호}:{닉네임}"`을 그 프로필로 바꾸고,
+/// 그 밖의 코드는 실패로 본다. 로그인 주소는 `https://kauth.test/authorize?state=...`.
+pub struct FakeKakao;
+
+pub const FAKE_LOGIN_URL: &str = "https://kauth.test/authorize";
+
+impl Kakao for FakeKakao {
+    fn login_url(&self, state: &str) -> String {
+        format!("{FAKE_LOGIN_URL}?state={state}")
+    }
+
+    fn profile<'a>(&'a self, code: &'a str) -> BoxFuture<'a, Result<KakaoProfile, String>> {
+        Box::pin(async move {
+            let (id, nickname) = code.split_once(':').ok_or("잘못된 코드")?;
+            Ok(KakaoProfile {
+                kakao_id: id.parse().map_err(|_| "잘못된 회원번호")?,
+                nickname: nickname.to_string(),
+            })
+        })
+    }
 }
 
 /// 응답 본문을 문자열로 읽는다.

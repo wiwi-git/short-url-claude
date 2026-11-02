@@ -12,12 +12,13 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn shorten_server_function_returns_the_rejection_reason() {
-    let (app, _db) = common::router().await;
+    let (app, _db, cookie) = common::signed_in_router().await;
 
     let res = app
         .oneshot(
             Request::post("/api/shorten")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
                 .body(Body::from(r#"{"original_url":"ftp://example.com/a"}"#))
                 .unwrap(),
         )
