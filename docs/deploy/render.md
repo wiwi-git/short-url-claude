@@ -52,7 +52,7 @@ Postgres를 띄운 뒤(명령은 `AGENTS.md`), 이미지를 Render와 같은 조
 
 ```bash
 docker build -t short-url:local .
-docker run --rm -p 10000:10000 -e PORT=10000 -e BASE_URL=http://localhost:10000 -e DATABASE_URL=postgres://postgres:postgres@host.docker.internal:5432/short_url -e KAKAO_REST_API_KEY -e KAKAO_CLIENT_SECRET short-url:local
+docker run --rm -p 10000:10000 -e PORT=10000 -e BASE_URL=http://localhost:10000 -e DATABASE_URL=postgres://postgres:postgres@host.docker.internal:5433/short_url -e KAKAO_REST_API_KEY -e KAKAO_CLIENT_SECRET short-url:local
 ```
 
 ## 남은 결정

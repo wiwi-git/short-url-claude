@@ -523,7 +523,7 @@ pub async fn remove(link_number: i64) -> Result<(), ServerFnError> {
 
 /// `DATABASE_URL`이 없을 때 붙는 로컬 개발용 Postgres (AGENTS.md의 docker 명령으로 띄운다).
 #[cfg(feature = "server")]
-pub const LOCAL_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/short_url";
+pub const LOCAL_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5433/short_url";
 
 /// `BASE_URL` 환경 변수. 없으면 로컬 개발 주소 `http://localhost:8080`.
 #[cfg(feature = "server")]

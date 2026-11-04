@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// `TEST_DATABASE_URL`이 없을 때 붙는 로컬 Postgres (AGENTS.md의 docker 명령으로 띄운다).
-const DEFAULT_TEST_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/short_url";
+const DEFAULT_TEST_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5433/short_url";
 
 /// 테스트 하나가 혼자 쓰는 빈 데이터베이스. 버릴 때 데이터베이스를 지운다.
 /// 테스트마다 데이터베이스가 따로라 병렬로 돌아도 Link Number가 섞이지 않는다.
