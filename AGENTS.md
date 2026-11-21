@@ -4,7 +4,7 @@ Rust 안정판 툴체인과 Dioxus 0.7 fullstack 프로젝트다.
 
 - 설치: `rustup update stable && rustup target add wasm32-unknown-unknown && cargo install dioxus-cli --version 0.7.10 --locked`
 - 개발 서버: `dx serve` (`http://localhost:8080`, `BASE_URL` 기본값과 같은 주소다. 클라이언트 wasm과 서버를 함께 빌드한다). 저장소는 SQLite 파일 하나다(ADR 0004). `DATABASE_URL`이 없으면 작업 폴더의 `short-url.db`(`sqlite://short-url.db`)를 쓰고, 파일과 테이블이 없으면 만든다. 카카오 로그인 키 `KAKAO_REST_API_KEY`, `KAKAO_CLIENT_SECRET`이 환경에 있어야 서버가 뜬다(설정은 `docs/deploy/duse.md`). 카카오 Redirect URI에 `http://localhost:8080/auth/kakao/callback`을 등록해 두면 로컬에서도 실제로 로그인할 수 있다
-- 배포: `scripts/deploy.sh` (duse 서버, `docs/deploy/duse.md`)
+- 배포: `scripts/deploy.sh` (duse 서버의 K3s, 매니페스트는 `deploy/k8s/`, 설명은 `docs/deploy/duse.md`)
 - 테스트: `cargo test` (카카오는 가짜를 꽂으므로 키가 필요 없다. 테스트 빌드에서는 dev-dependency로 `server` 기능이 켜진다. 테스트마다 임시 폴더에 새 SQLite 파일을 만들고 끝나면 지운다. 따로 띄울 DB가 없다)
 
 `dx`의 마이너 버전은 `Cargo.toml`의 `dioxus` 크레이트 버전(0.7.x)과 맞춘다. 커스텀 axum 라우트는 `src/lib.rs`의 `build_router`에 덧붙인다.

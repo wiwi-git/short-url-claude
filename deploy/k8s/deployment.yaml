@@ -1,0 +1,74 @@
+# short-url 앱 한 개. SQLite 파일 하나에 쓰므로 언제나 Pod 하나만 돈다(replicas 1, Recreate).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: short-url
+spec:
+  replicas: 1
+  # 새 Pod가 뜨기 전에 옛 Pod를 내린다. 두 Pod가 같은 SQLite 파일과 같은 포트(8190)를 잡지 않게 한다.
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      # 호스트 네트워크에서 127.0.0.1:8190에만 연다. Caddy(s.duse.dev)만 닿고 밖에서는 닿지 않는다.
+      # Service(LoadBalancer/NodePort)로 열면 0.0.0.0에 열려 서버 iptables를 우회하므로 쓰지 않는다.
+      # Caddyfile(reverse_proxy 127.0.0.1:8190)과 상태 카드의 health_url은 compose 때와 그대로다.
+      hostNetwork: true
+      # 호스트 네트워크 Pod의 기본 DNS는 호스트 것이다. 앱은 클러스터 안 이름을 찾지 않는다(카카오 API만 부른다).
+      dnsPolicy: Default
+      containers:
+        - name: app
+          # 레지스트리 없이 scripts/deploy.sh가 `k3s ctr images import`로 서버에 넣는다.
+          image: short-url:latest
+          imagePullPolicy: Never
+          env:
+            - name: IP
+              value: 127.0.0.1
+            - name: PORT
+              value: "8190"
+            - name: BASE_URL
+              value: https://s.duse.dev
+            - name: DATABASE_URL
+              value: sqlite:///data/short-url.db
+          # KAKAO_REST_API_KEY, KAKAO_CLIENT_SECRET
+          envFrom:
+            - secretRef:
+                name: short-url-kakao
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # 호스트 네트워크라 kubelet이 노드 IP로 묻지 않도록 127.0.0.1을 지정한다.
+          startupProbe:
+            httpGet:
+              host: 127.0.0.1
+              port: 8190
+              path: /api/stats
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              port: 8190
+              path: /api/stats
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              port: 8190
+              path: /api/stats
+            periodSeconds: 30
+            failureThreshold: 3
+          # 2 OCPU / 12GB를 방송 프로젝트와 나눠 쓴다. 요청은 작게, 메모리 상한만 둔다.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        # compose 때와 같은 서버 폴더를 그대로 쓴다. 데이터 이전이 필요 없고,
+        # short-url-backup.timer(sqlite3 .backup)와 되살리기 절차도 같은 경로로 동작한다.
+        - name: data
+          hostPath:
+            path: /opt/short-url/data
+            type: Directory

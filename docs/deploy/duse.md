@@ -1,6 +1,6 @@
 # duse 서버 배포
 
-short-url은 duse 서버(OCI 무료 범위의 ARM VM, 방송 프로젝트와 함께 씀)에서 컨테이너 하나로 돈다. 주소는 `https://s.duse.dev`이다. 저장소는 컨테이너 밖 서버 디스크에 둔 SQLite 파일이다(ADR 0004).
+short-url은 duse 서버(OCI 무료 범위의 ARM VM, 방송 프로젝트와 함께 씀)의 K3s에서 Pod 하나로 돈다(ADR 0005). 주소는 `https://s.duse.dev`이다. 저장소는 Pod 밖 서버 디스크에 둔 SQLite 파일이다(ADR 0004).
 
 서버 공통 규칙(접속, 포트, Caddy, 비용, 비밀값 다루는 법)은 `AGENTS.md`의 "배포 서버"가 가리키는 문서를 따른다. 서버 주소와 비밀값은 이 저장소에 적지 않는다.
 
@@ -8,14 +8,15 @@ short-url은 duse 서버(OCI 무료 범위의 ARM VM, 방송 프로젝트와 함
 
 | 항목 | 값 |
 | --- | --- |
-| 서버 폴더 | `/opt/short-url` (`compose.yaml`, `.env`, `data/`, `backups/`) |
-| 포트 | `127.0.0.1:8190` → 컨테이너 `8080`. 밖에서는 Caddy의 `s.duse.dev` 블록으로만 닿는다 |
-| 저장소 | `/opt/short-url/data/short-url.db` (컨테이너 안 `/data/short-url.db`) |
-| 비밀값 | `/opt/short-url/.env`(권한 600)의 `KAKAO_REST_API_KEY`, `KAKAO_CLIENT_SECRET` |
+| 서버 폴더 | `/opt/short-url` (`k8s/`, `.env`, `data/`, `backups/`) |
+| K3s | 네임스페이스 `short-url`, Deployment `short-url`(Pod 1개, `Recreate`), Secret `short-url-kakao` |
+| 포트 | `hostNetwork`로 `127.0.0.1:8190`에만 연다. 밖에서는 Caddy의 `s.duse.dev` 블록으로만 닿는다. Service는 없다 |
+| 저장소 | `/opt/short-url/data/short-url.db` (`hostPath`, Pod 안 `/data/short-url.db`) |
+| 비밀값 | `/opt/short-url/.env`(권한 600)의 `KAKAO_REST_API_KEY`, `KAKAO_CLIENT_SECRET`. 배포 때마다 Secret으로 만든다 |
 | 백업 | `short-url-backup.timer`가 매일 `/opt/short-url/backups/short-url-<날짜>.db`를 만들고 7일치만 남긴다 |
 | 상태 확인 | `https://s.duse.dev/api/stats`, 홈 카드 `https://duse.dev` |
 
-`deploy/` 폴더의 파일이 서버 파일의 원본이다. `compose.yaml`은 배포할 때마다 서버로 복사되고, 백업 systemd 파일은 처음 한 번 설정할 때 복사한다.
+`deploy/` 폴더의 파일이 서버 파일의 원본이다. `deploy/k8s/`(kustomize)는 배포할 때마다 서버의 `/opt/short-url/k8s/`로 복사되고, 백업 systemd 파일은 처음 한 번 설정할 때 복사한다. kubectl은 Mac이 아니라 서버에서 `sudo k3s kubectl`로 돈다(Mac에 kubeconfig가 필요 없다).
 
 ## 배포
 
@@ -25,9 +26,24 @@ Mac에서 다음을 실행한다.
 scripts/deploy.sh
 ```
 
-스크립트는 `cargo test` → `docker build --platform linux/arm64` → `docker save | ssh duse docker load` → `docker compose up -d` → `/api/stats` 응답 확인 순서로 진행하고, 어느 단계든 실패하면 멈춘다. git push로는 배포되지 않는다. Mac과 서버가 둘 다 arm64라 Mac에서 만든 이미지가 서버에서 그대로 돈다. 첫 빌드는 Rust와 wasm을 처음부터 컴파일해서 10분 이상 걸릴 수 있다.
+스크립트는 `cargo test` → `docker build --platform linux/arm64` → 서버 확인(K3s, `.env`, `data/`) → `docker save | ssh duse sudo k3s ctr images import -` → `.env`로 Secret 생성 → `kubectl apply -k` → `rollout restart`·`rollout status` → `/api/stats` 응답 확인 순서로 진행하고, 어느 단계든 실패하면 멈춘다. git push로는 배포되지 않는다. Mac과 서버가 둘 다 arm64라 Mac에서 만든 이미지가 서버에서 그대로 돈다. 첫 빌드는 Rust와 wasm을 처음부터 컴파일해서 10분 이상 걸릴 수 있다.
 
-필요한 것: Docker Desktop이 켜져 있을 것, `~/.ssh/config`에 서버 별칭 `duse`가 있을 것(다른 이름이면 `DUSE_SSH=<별칭> scripts/deploy.sh`).
+필요한 것: Docker Desktop이 켜져 있을 것, `~/.ssh/config`에 서버 별칭 `duse`가 있을 것(다른 이름이면 `DUSE_SSH=<별칭> scripts/deploy.sh`), 서버에 K3s가 설치되어 있을 것(방송 프로젝트가 `--disable traefik`으로 설치한다).
+
+## compose에서 옮긴 기록
+
+2026-11-21까지는 `/opt/short-url/compose.yaml`(docker compose)로 돌았다. 그날 방송 프로젝트와 함께 K3s로 옮기고 서버에서 Docker를 지웠다. 데이터 폴더, `.env`, 백업 timer, Caddy 블록, 상태 카드의 `health_url`은 그대로 썼다. 옮기기 직전 백업은 `/opt/short-url/backups/short-url-before-k3s.db`에 있다(날짜 이름이 아니라서 7일 정리에 지워지지 않는다).
+
+## 켜기·끄기·상태
+
+```bash
+ssh duse 'sudo k3s kubectl -n short-url scale deployment/short-url --replicas=1'   # 켜기
+ssh duse 'sudo k3s kubectl -n short-url scale deployment/short-url --replicas=0'   # 끄기
+ssh duse 'sudo k3s kubectl -n short-url get pods -o wide'                           # 상태
+ssh duse 'sudo k3s kubectl -n short-url logs deploy/short-url --tail=100'           # 로그
+```
+
+replicas를 0으로 둔 채 `scripts/deploy.sh`를 돌려도 Deployment가 매니페스트대로 1로 돌아간다.
 
 ## 처음 한 번 설정
 
@@ -40,14 +56,14 @@ scripts/deploy.sh
    ```
 3. 백업을 켠다: `sudo apt install -y sqlite3`, `deploy/short-url-backup.{service,timer}`를 `/etc/systemd/system/`에 복사한 뒤 `sudo systemctl daemon-reload && sudo systemctl enable --now short-url-backup.timer`
 4. Caddy에 블록을 더한다(먼저 Caddyfile을 백업): `s.duse.dev { reverse_proxy 127.0.0.1:8190 }`
-5. 홈 카드에 등록한다: `/etc/duse/services.json`에 `compose_dir` `/opt/short-url`, `compose_files` `["compose.yaml"]`, `health_url` `http://127.0.0.1:8190/api/stats`인 항목을 더한다.
+5. 홈 카드에 등록한다: `/etc/duse/services.json`에 `id` `short-url`, `kind` `k8s`, `namespace` `short-url`, `health_url` `http://127.0.0.1:8190/api/stats`인 항목을 더한다.
 
-Mac에서는 `scripts/deploy.sh`를 실행한다. 켜기, 끄기, 상태 보기는 `~/.zshrc`의 `surl-on`, `surl-off`, `surl-status`로 한다.
+Mac에서는 `scripts/deploy.sh`를 실행한다.
 
 ## 백업에서 되살리기
 
 ```bash
-ssh duse 'cd /opt/short-url && docker compose stop && cp backups/short-url-<날짜>.db data/short-url.db && rm -f data/short-url.db-wal data/short-url.db-shm && docker compose start'
+ssh duse 'set -e; k="sudo k3s kubectl -n short-url"; $k scale deployment/short-url --replicas=0; $k wait --for=delete pod -l app.kubernetes.io/name=short-url --timeout=60s; cd /opt/short-url; cp backups/short-url-<날짜>.db data/short-url.db; rm -f data/short-url.db-wal data/short-url.db-shm; $k scale deployment/short-url --replicas=1'
 ```
 
 백업은 같은 VM 안에 있으므로 VM을 잃으면 함께 잃는다. 중요한 시점에는 Mac으로 받아 둔다: `scp duse:/opt/short-url/backups/short-url-<날짜>.db .`
