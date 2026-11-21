@@ -11,7 +11,7 @@ Rust 안정판 툴체인과 Dioxus 0.7 fullstack 프로젝트다.
 
 ## 배포 서버
 
-운영 서버(duse.dev, OCI 도쿄 ARM VM)에 무언가를 올리거나 고치기 전에 `/Users/widaeyeon/claude-test/web-broadcast-proj/duse-server.md`를 먼저 읽고 그 규칙을 따른다. 그 문서가 서버 구성의 단일 원본이다(방송 프로젝트 폴더에만 있고 git이 추적하지 않는다). 서버 IP, 접속 방법, 비밀값을 이 저장소에 옮겨 적지 않는다. 서버 구성을 바꾸면 그 문서를 고친다.
+운영 서버(duse.dev, OCI 도쿄 ARM VM)에 무언가를 올리거나 고치기 전에 `../web-broadcast-proj/duse-server.md`(이 저장소와 나란한 방송 프로젝트 폴더)를 먼저 읽고 그 규칙을 따른다. 그 문서가 서버 구성의 단일 원본이다(방송 프로젝트 폴더에만 있고 git이 추적하지 않는다). 서버 IP, 접속 방법, 비밀값을 이 저장소에 옮겨 적지 않는다. 서버 구성을 바꾸면 그 문서를 고친다.
 
 ## Agent skills
 
