@@ -1,3 +1,7 @@
+---
+Status: superseded by ADR-0004
+---
+
 # 저장소는 SQLite가 아니라 Postgres
 
 Render 무료 플랜에 배포하기로 했는데, 무료 웹 서비스는 파일 시스템이 휘발성이라(15분 유휴로 잠들거나 재배포할 때마다 초기화) SQLite 파일에 둔 Short Link가 사라지고, 영구 디스크는 유료 플랜에서만 붙일 수 있다. 그래서 저장소를 Postgres로 바꾸고, 로컬 개발과 테스트도 Postgres 하나로 통일한다(SQLite와 두 벌로 유지하지 않는다).

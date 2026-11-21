@@ -1,0 +1,10 @@
+# /etc/systemd/system/short-url-backup.timer
+[Unit]
+Description=short-url SQLite 매일 백업
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

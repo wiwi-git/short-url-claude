@@ -1,0 +1,9 @@
+# /etc/systemd/system/short-url-backup.service
+# SQLite 저장소를 날짜별 파일로 백업하고 7일보다 오래된 백업을 지운다.
+# 앱이 쓰는 도중에도 깨지지 않게 cp가 아니라 sqlite3의 .backup을 쓴다.
+[Unit]
+Description=short-url SQLite 백업
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'sqlite3 /opt/short-url/data/short-url.db ".backup /opt/short-url/backups/short-url-$(date +%%F).db" && find /opt/short-url/backups -name "short-url-*.db" -mtime +6 -delete'

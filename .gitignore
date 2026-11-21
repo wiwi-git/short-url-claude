@@ -5,3 +5,4 @@ target/
 *.sqlite-*
 .DS_Store
 .claude/worktrees/
+.local-data/

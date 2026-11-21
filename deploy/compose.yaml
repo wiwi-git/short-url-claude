@@ -1,0 +1,15 @@
+# duse 서버의 /opt/short-url/compose.yaml. scripts/deploy.sh가 이 파일을 서버로 복사한다.
+# 이미지는 서버에 레지스트리 없이 직접 넣는다(docker load). 비밀값(카카오 키)은 같은 폴더의 .env(권한 600)에 둔다.
+services:
+  app:
+    image: short-url:latest
+    restart: unless-stopped
+    # Caddy(s.duse.dev)만 닿도록 127.0.0.1에만 연다. 0.0.0.0으로 열면 서버 방화벽을 우회한다.
+    ports:
+      - "127.0.0.1:8190:8080"
+    env_file: .env
+    environment:
+      BASE_URL: https://s.duse.dev
+      DATABASE_URL: sqlite:///data/short-url.db
+    volumes:
+      - ./data:/data

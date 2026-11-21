@@ -1,6 +1,6 @@
 #![cfg(feature = "server")]
 
-//! 경계 2: HTTP 서버(얇게). 새 Postgres 데이터베이스를 붙인 실제 라우터에 요청을 보낸다.
+//! 경계 2: HTTP 서버(얇게). 새 SQLite 저장소를 붙인 실제 라우터에 요청을 보낸다.
 
 mod common;
 

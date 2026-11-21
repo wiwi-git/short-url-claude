@@ -7,3 +7,4 @@ target/
 .claude/
 .env
 .DS_Store
+.local-data/

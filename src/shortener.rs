@@ -1,7 +1,7 @@
 //! Shortener: Shorten과 Follow 규칙을 화면, HTTP와 떼어 놓은 모듈.
 //!
 //! User(카카오 로그인), My Links, Remove, 세션, 통계도 같은 저장소에 두므로 함께 다룬다 (ADR 0003).
-//! 서비스 주소와 저장소(Postgres 접속 주소, ADR 0002)는 생성 시점에 받는다.
+//! 서비스 주소와 저장소(SQLite 파일 주소, ADR 0004)는 생성 시점에 받는다.
 //! [`Rejection`], [`ShortLinkPage`], [`Stats`]는 화면에서도 쓰므로 server 기능 없이도 컴파일된다.
 
 use serde::{Deserialize, Serialize};
@@ -87,15 +87,17 @@ mod server {
         Rejection, ShortLink, ShortLinkPage, Stats, User, MAX_INPUT_CHARS, SESSION_DAYS,
         SHORT_LINKS_PER_PAGE,
     };
-    use sqlx::postgres::{PgPool, PgPoolOptions};
-    use std::time::Duration;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
+    use sqlx::{Sqlite, Transaction};
+    use std::str::FromStr;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use url::Url;
 
     pub struct Shortener {
         base_url: String,
         /// 서비스 주소의 호스트와 포트(스킴 기본 포트면 `None`). 자기 주소 판단에 쓴다.
         own_host: HostAndPort,
-        pool: PgPool,
+        pool: SqlitePool,
     }
 
     type HostAndPort = (String, Option<u16>);
@@ -139,7 +141,7 @@ mod server {
         }
     }
 
-    /// 저장소(Postgres)를 쓰거나 읽지 못했다.
+    /// 저장소(SQLite)를 쓰거나 읽지 못했다.
     #[derive(Debug)]
     pub struct StorageError(sqlx::Error);
 
@@ -174,7 +176,8 @@ mod server {
     }
 
     impl Shortener {
-        /// `database_url`의 Postgres에 붙고, 테이블이 없으면 만들어 저장소를 준비한다.
+        /// `database_url`(`sqlite://<파일 경로>`)의 SQLite 파일을 열고(없으면 만든다),
+        /// 테이블이 없으면 만들어 저장소를 준비한다.
         /// `base_url`은 Short Link 앞부분이며 끝의 `/`는 뗀다.
         /// `base_url`이 호스트가 있는 http(s) URL이 아니면 저장소에 붙지 않고 실패한다.
         pub async fn open(base_url: &str, database_url: &str) -> Result<Self, OpenError> {
@@ -247,12 +250,11 @@ mod server {
         ) -> Result<String, StorageError> {
             let token = random_token();
             sqlx::query(
-                "INSERT INTO sessions (token, user_id, expires_at)
-                 VALUES ($1, $2, now() + make_interval(secs => $3))",
+                "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
             )
             .bind(&token)
             .bind(user.id)
-            .bind(lifetime.as_secs_f64())
+            .bind(now_seconds() + lifetime.as_secs_f64())
             .execute(&self.pool)
             .await?;
             Ok(token)
@@ -263,9 +265,10 @@ mod server {
             let row: Option<(i64, String)> = sqlx::query_as(
                 "SELECT users.id, users.nickname FROM sessions
                  JOIN users ON users.id = sessions.user_id
-                 WHERE sessions.token = $1 AND sessions.expires_at > now()",
+                 WHERE sessions.token = $1 AND sessions.expires_at > $2",
             )
             .bind(token)
+            .bind(now_seconds())
             .fetch_optional(&self.pool)
             .await?;
             Ok(row.map(|(id, nickname)| User { id, nickname }))
@@ -283,9 +286,8 @@ mod server {
         /// User의 My Links에서 Short Link를 뺀다. 그 Short Link를 담은 User가 더는 없으면
         /// Short Link도 지운다(그 번호는 다시 쓰지 않는다). 내 My Links에 없는 번호면 아무 일도 하지 않는다.
         pub async fn remove(&self, user: &User, link_number: i64) -> Result<(), StorageError> {
-            let mut tx = self.pool.begin().await?;
-            // Shorten이 같은 Short Link를 동시에 다시 담는 것과 엇갈리지 않게 발급과 같은 잠금을 잡는다.
-            lock_issuing(&mut tx).await?;
+            // Shorten이 같은 Short Link를 동시에 다시 담는 것과 엇갈리지 않게 쓰기 잠금을 먼저 잡는다.
+            let mut tx = begin_writing(&self.pool).await?;
             let removed =
                 sqlx::query("DELETE FROM my_links WHERE user_id = $1 AND link_number = $2")
                     .bind(user.id)
@@ -362,7 +364,7 @@ mod server {
             // 다음 페이지가 있는지 보려고 하나 더 읽는다.
             let mut link_numbers: Vec<i64> = sqlx::query_scalar(
                 "SELECT link_number FROM my_links WHERE user_id = $1
-                 ORDER BY added_at DESC, link_number DESC LIMIT $2 OFFSET $3",
+                 ORDER BY rowid DESC LIMIT $2 OFFSET $3",
             )
             .bind(user.id)
             .bind(per_page + 1)
@@ -419,92 +421,84 @@ mod server {
         format!("{scheme}://{userinfo}{}{port}{tail}", host.to_lowercase())
     }
 
-    /// Link Number 발급을 한 줄로 세우는 트랜잭션 advisory lock의 키 (임의의 고정값).
-    /// advisory lock은 데이터베이스마다 따로라 다른 데이터베이스와 부딪치지 않는다.
-    const ISSUE_LOCK_KEY: i64 = 0x5348_4f52_545f_5552; // "SHORT_UR"
-
-    /// 저장소에 붙고 테이블이 없으면 만든다. 여러 서버가 동시에 떠도
-    /// `CREATE TABLE IF NOT EXISTS`끼리 부딪치지 않게 발급과 같은 잠금 아래에서 만든다.
-    ///
-    /// 번호 발급 상태 표(`link_number_issuer`)가 아직 없으면 로그인 기능 전의 저장소다.
-    /// 그때 한 번만 주인 없는 Short Link를 모두 지우고 번호를 1부터 다시 시작한다 (ADR 0003).
-    async fn open_storage(database_url: &str) -> sqlx::Result<PgPool> {
-        let pool = PgPoolOptions::new()
+    /// 저장소를 열고 테이블이 없으면 만든다. WAL 모드라 읽기는 쓰기를 기다리지 않는다.
+    /// 여러 서버(연결 풀)가 같은 파일을 동시에 열어도 쓰기 잠금 아래에서 만들어 부딪치지 않는다.
+    async fn open_storage(database_url: &str) -> sqlx::Result<SqlitePool> {
+        let options = SqliteConnectOptions::from_str(database_url)?
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .foreign_keys(true)
+            // 다른 연결이 쓰기 잠금을 쥐고 있으면 이만큼 기다린다.
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(database_url)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_with(options)
             .await?;
-        let mut tx = pool.begin().await?;
-        lock_issuing(&mut tx).await?;
-        let issuer_exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('link_number_issuer') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await?;
+        let mut tx = begin_writing(&pool).await?;
         sqlx::raw_sql(
             "CREATE TABLE IF NOT EXISTS short_links (
-                 link_number  BIGINT PRIMARY KEY,
+                 link_number  INTEGER PRIMARY KEY,
                  original_url TEXT NOT NULL UNIQUE
              );
              CREATE TABLE IF NOT EXISTS link_number_issuer (
-                 only_row    BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (only_row),
-                 last_issued BIGINT NOT NULL
+                 only_row    INTEGER PRIMARY KEY DEFAULT 1 CHECK (only_row = 1),
+                 last_issued INTEGER NOT NULL
              );
+             INSERT OR IGNORE INTO link_number_issuer (only_row, last_issued) VALUES (1, 0);
              CREATE TABLE IF NOT EXISTS users (
-                 id         BIGSERIAL PRIMARY KEY,
-                 kakao_id   BIGINT NOT NULL UNIQUE,
+                 id         INTEGER PRIMARY KEY,
+                 kakao_id   INTEGER NOT NULL UNIQUE,
                  nickname   TEXT NOT NULL,
-                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
              );
+             -- 담은 순서는 rowid(늘 커지는 행 번호)로 본다.
              CREATE TABLE IF NOT EXISTS my_links (
-                 user_id     BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-                 link_number BIGINT NOT NULL REFERENCES short_links (link_number) ON DELETE CASCADE,
-                 added_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                 user_id     INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                 link_number INTEGER NOT NULL REFERENCES short_links (link_number) ON DELETE CASCADE,
                  PRIMARY KEY (user_id, link_number)
              );
              CREATE INDEX IF NOT EXISTS my_links_link_number ON my_links (link_number);
+             -- expires_at은 유닉스 시각(초, 소수 포함).
              CREATE TABLE IF NOT EXISTS sessions (
                  token      TEXT PRIMARY KEY,
-                 user_id    BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-                 expires_at TIMESTAMPTZ NOT NULL
+                 user_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                 expires_at REAL NOT NULL
              );",
         )
         .execute(&mut *tx)
         .await?;
-        if !issuer_exists {
-            sqlx::query("DELETE FROM short_links")
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("INSERT INTO link_number_issuer (last_issued) VALUES (0)")
-                .execute(&mut *tx)
-                .await?;
-        }
         tx.commit().await?;
         Ok(pool)
     }
 
-    /// 발급을 한 번에 하나씩 세우는 트랜잭션 advisory lock을 잡는다. 커밋이나 롤백 때 풀린다.
-    async fn lock_issuing(tx: &mut sqlx::PgConnection) -> sqlx::Result<()> {
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(ISSUE_LOCK_KEY)
-            .execute(tx)
-            .await?;
-        Ok(())
+    /// 처음부터 쓰기 잠금을 잡는 트랜잭션(`BEGIN IMMEDIATE`)을 연다. SQLite는 쓰는 쪽이 늘
+    /// 하나뿐이라, 이 잠금이 Link Number 발급과 Remove를 한 번에 하나씩 세운다(ADR 0001).
+    /// 보통 `BEGIN`은 읽다가 쓰기로 넘어갈 때 다른 쓰기와 부딪쳐 기다리지 않고 실패할 수 있다.
+    async fn begin_writing(pool: &SqlitePool) -> sqlx::Result<Transaction<'static, Sqlite>> {
+        pool.begin_with("BEGIN IMMEDIATE").await
+    }
+
+    /// 지금 유닉스 시각(초, 소수 포함). 세션 만료에 쓴다.
+    fn now_seconds() -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("시계가 1970년보다 이르다")
+            .as_secs_f64()
     }
 
     /// Original URL의 Link Number를 찾거나 새로 발급하고, User의 My Links에 담는다.
     ///
-    /// Postgres 시퀀스는 충돌하거나 롤백된 INSERT에서도 값을 써 버려 번호가 건너뛴다(ADR 0002).
-    /// 그래서 시퀀스를 쓰지 않고, 트랜잭션 advisory lock으로 발급을 한 번에 하나씩 세운 뒤
-    /// 기존 행을 찾고, 없으면 지금까지 발급한 가장 큰 번호(`link_number_issuer`) 다음 번호로 넣는다.
+    /// 쓰기 잠금으로 발급을 한 번에 하나씩 세운 뒤 기존 행을 찾고, 없으면 지금까지 발급한
+    /// 가장 큰 번호(`link_number_issuer`) 다음 번호로 넣는다.
     /// Short Link가 지워져도 발급한 가장 큰 번호는 줄지 않아 번호를 다시 쓰지 않는다(ADR 0003).
     /// 롤백된 발급은 번호를 남기지 않는다.
     async fn shorten_into_my_links(
-        pool: &PgPool,
+        pool: &SqlitePool,
         user_id: i64,
         original_url: &str,
     ) -> sqlx::Result<i64> {
-        let mut tx = pool.begin().await?;
-        lock_issuing(&mut tx).await?;
+        let mut tx = begin_writing(pool).await?;
         let existing: Option<i64> =
             sqlx::query_scalar("SELECT link_number FROM short_links WHERE original_url = $1")
                 .bind(original_url)

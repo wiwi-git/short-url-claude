@@ -1,6 +1,6 @@
 #![cfg(feature = "server")]
 
-//! 경계 1: Shortener 모듈. 테스트마다 새 Postgres 데이터베이스를 쓴다 (ADR 0002).
+//! 경계 1: Shortener 모듈. 테스트마다 새 SQLite 파일을 쓴다 (ADR 0004).
 
 mod common;
 
@@ -905,43 +905,5 @@ async fn stats_count_users_and_short_links_that_still_work() {
             users: 2,
             short_links: 1
         }
-    );
-}
-
-#[tokio::test]
-async fn opening_storage_from_before_login_deletes_ownerless_short_links_once() {
-    let db = TestDb::new().await;
-    {
-        // 로그인 기능 전 스키마: short_links 표만 있다.
-        use sqlx::Connection;
-        let mut conn = sqlx::PgConnection::connect(&db.url).await.unwrap();
-        sqlx::raw_sql(
-            "CREATE TABLE short_links (link_number BIGINT PRIMARY KEY, original_url TEXT NOT NULL UNIQUE);
-             INSERT INTO short_links VALUES (1, 'https://example.com/old-1'), (54, 'https://example.com/old-54');",
-        )
-        .execute(&mut conn)
-        .await
-        .unwrap();
-    }
-
-    let shortener = shortener(&db).await;
-    let user = common::user(&shortener).await;
-
-    assert_eq!(shortener.follow("1").await.unwrap(), None);
-    assert_eq!(shortener.follow("54").await.unwrap(), None);
-    assert_eq!(
-        shortener
-            .shorten(&user, "https://example.com/new")
-            .await
-            .unwrap(),
-        "http://localhost:8080/1",
-        "번호는 1부터 다시 시작한다"
-    );
-
-    let reopened = common::shortener(&db).await;
-    assert_eq!(
-        reopened.follow("1").await.unwrap().as_deref(),
-        Some("https://example.com/new"),
-        "두 번째로 열 때는 지우지 않는다"
     );
 }
