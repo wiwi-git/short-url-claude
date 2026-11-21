@@ -46,11 +46,17 @@ impl std::fmt::Display for Rejection {
 /// Short Link 목록 한 페이지에 담는 Short Link 수.
 pub const SHORT_LINKS_PER_PAGE: u32 = 50;
 
-/// 목록에 보여 줄 Short Link 하나. Remove할 때 Link Number를 쓴다.
+/// Link Name의 최대 길이(문자 수, 앞뒤 공백을 뗀 뒤).
+pub const MAX_LINK_NAME_CHARS: usize = 100;
+
+/// 목록에 보여 줄 My Links 항목 하나. Remove와 이름 고치기에 Link Number를 쓴다.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortLink {
     pub link_number: i64,
     pub short_link: String,
+    pub original_url: String,
+    /// 이 User가 붙인 Link Name. `None`이면 화면은 Original URL을 대신 보여 준다.
+    pub link_name: Option<String>,
 }
 
 /// My Links의 한 페이지. 담은 순서의 최신순이다.
@@ -79,19 +85,19 @@ pub struct Stats {
 pub const SESSION_DAYS: u64 = 30;
 
 #[cfg(feature = "server")]
-pub use server::{random_token, OpenError, ShortenError, Shortener, StorageError};
+pub use server::{random_token, OpenError, RenameError, ShortenError, Shortener, StorageError};
 
 #[cfg(feature = "server")]
 mod server {
     use super::{
-        Rejection, ShortLink, ShortLinkPage, Stats, User, MAX_INPUT_CHARS, SESSION_DAYS,
-        SHORT_LINKS_PER_PAGE,
+        Rejection, ShortLink, ShortLinkPage, Stats, User, MAX_INPUT_CHARS, MAX_LINK_NAME_CHARS,
+        SESSION_DAYS, SHORT_LINKS_PER_PAGE,
     };
     use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
     use sqlx::{Sqlite, Transaction};
     use std::str::FromStr;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use url::Url;
+    use url::{Host, Url};
 
     pub struct Shortener {
         base_url: String,
@@ -109,6 +115,21 @@ mod server {
         Rejected(Rejection),
         /// 입력은 받아들였지만 저장소에 쓰거나 읽지 못했다.
         Storage(StorageError),
+    }
+
+    /// Link Name을 고치지 못한 이유.
+    #[derive(Debug, PartialEq)]
+    pub enum RenameError {
+        /// 앞뒤 공백을 뗀 이름이 [`MAX_LINK_NAME_CHARS`]자를 넘는다.
+        TooLong,
+        /// 저장소에 쓰지 못했다.
+        Storage(StorageError),
+    }
+
+    impl From<sqlx::Error> for RenameError {
+        fn from(e: sqlx::Error) -> Self {
+            RenameError::Storage(e.into())
+        }
     }
 
     /// Shortener를 열지 못한 이유.
@@ -249,14 +270,12 @@ mod server {
             lifetime: Duration,
         ) -> Result<String, StorageError> {
             let token = random_token();
-            sqlx::query(
-                "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
-            )
-            .bind(&token)
-            .bind(user.id)
-            .bind(now_seconds() + lifetime.as_secs_f64())
-            .execute(&self.pool)
-            .await?;
+            sqlx::query("INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)")
+                .bind(&token)
+                .bind(user.id)
+                .bind(now_seconds() + lifetime.as_secs_f64())
+                .execute(&self.pool)
+                .await?;
             Ok(token)
         }
 
@@ -305,6 +324,30 @@ mod server {
                 .await?;
             }
             tx.commit().await?;
+            Ok(())
+        }
+
+        /// User의 My Links에 담긴 Short Link의 Link Name을 고친다. 앞뒤 공백을 떼고,
+        /// 비면 Link Name을 없앤다. 내 My Links에 없는 번호면 아무 일도 하지 않는다.
+        pub async fn rename(
+            &self,
+            user: &User,
+            link_number: i64,
+            input: &str,
+        ) -> Result<(), RenameError> {
+            let trimmed = input.trim();
+            if trimmed.chars().count() > MAX_LINK_NAME_CHARS {
+                return Err(RenameError::TooLong);
+            }
+            let link_name = (!trimmed.is_empty()).then_some(trimmed);
+            sqlx::query(
+                "UPDATE my_links SET link_name = $1 WHERE user_id = $2 AND link_number = $3",
+            )
+            .bind(link_name)
+            .bind(user.id)
+            .bind(link_number)
+            .execute(&self.pool)
+            .await?;
             Ok(())
         }
 
@@ -362,28 +405,49 @@ mod server {
         ) -> Result<ShortLinkPage, StorageError> {
             let per_page = i64::from(SHORT_LINKS_PER_PAGE);
             // 다음 페이지가 있는지 보려고 하나 더 읽는다.
-            let mut link_numbers: Vec<i64> = sqlx::query_scalar(
-                "SELECT link_number FROM my_links WHERE user_id = $1
-                 ORDER BY rowid DESC LIMIT $2 OFFSET $3",
+            let mut rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+                "SELECT my_links.link_number, short_links.original_url, my_links.link_name
+                 FROM my_links JOIN short_links USING (link_number)
+                 WHERE my_links.user_id = $1
+                 ORDER BY my_links.rowid DESC LIMIT $2 OFFSET $3",
             )
             .bind(user.id)
             .bind(per_page + 1)
             .bind(i64::from(page) * per_page)
             .fetch_all(&self.pool)
             .await?;
-            let has_next = link_numbers.len() as i64 > per_page;
-            link_numbers.truncate(SHORT_LINKS_PER_PAGE as usize);
+            let has_next = rows.len() as i64 > per_page;
+            rows.truncate(SHORT_LINKS_PER_PAGE as usize);
             Ok(ShortLinkPage {
-                short_links: link_numbers
+                short_links: rows
                     .into_iter()
-                    .map(|link_number| ShortLink {
+                    .map(|(link_number, original_url, link_name)| ShortLink {
                         link_number,
                         short_link: self.short_link(link_number),
+                        original_url,
+                        link_name,
                     })
                     .collect(),
                 has_next,
             })
         }
+    }
+
+    /// Shorten할 때 붙이는 기본 Link Name: Original URL의 호스트. 앞의 `www.`만 떼고
+    /// 다른 서브도메인은 둔다. 포트는 빼고, 한글 도메인(`xn--...`)은 읽을 수 있는 글자로 바꾼다.
+    /// 외부 사이트에는 접속하지 않는다. 호스트가 없으면 `None`.
+    fn default_link_name(original_url: &str) -> Option<String> {
+        let url = Url::parse(original_url).ok()?;
+        let host = match url.host()? {
+            Host::Domain(domain) => idna::domain_to_unicode(domain).0,
+            Host::Ipv4(ip) => ip.to_string(),
+            Host::Ipv6(ip) => format!("[{ip}]"),
+        };
+        let name = match host.strip_prefix("www.") {
+            Some(rest) if !rest.is_empty() => rest,
+            _ => host.as_str(),
+        };
+        Some(name.chars().take(MAX_LINK_NAME_CHARS).collect())
     }
 
     /// URL 정리 규칙: 스킴과 호스트를 소문자로, 기본 포트를 뺀다 (앞뒤 공백은 이미 뗐다).
@@ -456,6 +520,7 @@ mod server {
              CREATE TABLE IF NOT EXISTS my_links (
                  user_id     INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
                  link_number INTEGER NOT NULL REFERENCES short_links (link_number) ON DELETE CASCADE,
+                 link_name   TEXT,
                  PRIMARY KEY (user_id, link_number)
              );
              CREATE INDEX IF NOT EXISTS my_links_link_number ON my_links (link_number);
@@ -468,8 +533,39 @@ mod server {
         )
         .execute(&mut *tx)
         .await?;
+        add_link_names(&mut tx).await?;
         tx.commit().await?;
         Ok(pool)
+    }
+
+    /// Link Name이 생기기 전 저장소면 `link_name` 칸을 더하고, 이미 담긴 항목을 기본 Link Name으로
+    /// 한 번만 채운다. 칸이 이미 있으면 아무것도 하지 않는다(User가 지운 이름을 다시 채우지 않는다).
+    async fn add_link_names(tx: &mut Transaction<'static, Sqlite>) -> sqlx::Result<()> {
+        let has_column: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('my_links') WHERE name = 'link_name')",
+        )
+        .fetch_one(&mut **tx)
+        .await?;
+        if has_column {
+            return Ok(());
+        }
+        sqlx::query("ALTER TABLE my_links ADD COLUMN link_name TEXT")
+            .execute(&mut **tx)
+            .await?;
+        let links: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT link_number, original_url FROM short_links
+             WHERE link_number IN (SELECT link_number FROM my_links)",
+        )
+        .fetch_all(&mut **tx)
+        .await?;
+        for (link_number, original_url) in links {
+            sqlx::query("UPDATE my_links SET link_name = $1 WHERE link_number = $2")
+                .bind(default_link_name(&original_url))
+                .bind(link_number)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Ok(())
     }
 
     /// 처음부터 쓰기 잠금을 잡는 트랜잭션(`BEGIN IMMEDIATE`)을 연다. SQLite는 쓰는 쪽이 늘
@@ -487,7 +583,8 @@ mod server {
             .as_secs_f64()
     }
 
-    /// Original URL의 Link Number를 찾거나 새로 발급하고, User의 My Links에 담는다.
+    /// Original URL의 Link Number를 찾거나 새로 발급하고, User의 My Links에 기본 Link Name과 함께
+    /// 담는다. 이미 담겨 있으면 Link Name을 포함해 그대로 둔다.
     ///
     /// 쓰기 잠금으로 발급을 한 번에 하나씩 세운 뒤 기존 행을 찾고, 없으면 지금까지 발급한
     /// 가장 큰 번호(`link_number_issuer`) 다음 번호로 넣는다.
@@ -522,11 +619,12 @@ mod server {
             }
         };
         sqlx::query(
-            "INSERT INTO my_links (user_id, link_number) VALUES ($1, $2)
+            "INSERT INTO my_links (user_id, link_number, link_name) VALUES ($1, $2, $3)
              ON CONFLICT DO NOTHING",
         )
         .bind(user_id)
         .bind(link_number)
+        .bind(default_link_name(original_url))
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

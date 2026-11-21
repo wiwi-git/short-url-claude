@@ -36,6 +36,11 @@ impl TestDb {
         TestDb { url, dir }
     }
 
+    /// 파일이 없으면 만드는 연결 주소. 예전 스키마 저장소를 직접 만들 때 쓴다.
+    pub fn url_creating(&self) -> String {
+        format!("{}?mode=rwc", self.url)
+    }
+
     /// 열린 Shortener 아래의 테이블을 지워 저장소를 못 쓰게 만든다.
     pub async fn break_storage(&self) {
         let mut conn = SqliteConnection::connect(&self.url).await.unwrap();

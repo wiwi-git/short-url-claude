@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub mod kakao;
 pub mod shortener;
 
-use shortener::{Rejection, ShortLinkPage};
+use shortener::{Rejection, ShortLink, ShortLinkPage, MAX_LINK_NAME_CHARS};
 
 pub const SERVICE_NAME: &str = "short-url";
 
@@ -118,6 +118,26 @@ li {
   border-bottom: 1px solid var(--border);
 }
 li:last-child { border-bottom: 0; }
+li .link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+}
+li .link a { max-width: 100%; }
+li .name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+li .short { font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+li .quiet { flex-shrink: 0; }
+li:has(.rename) { flex-direction: column; align-items: stretch; gap: 4px; }
+.rename { flex: 1; gap: 6px; }
+.rename input { padding: 6px 10px; font-size: 0.9rem; border-radius: 8px; }
 nav { display: flex; justify-content: center; gap: 8px; margin-top: 16px; }
 nav button { padding: 8px 16px; font-size: 0.9rem; }
 .empty { color: var(--muted); margin: 0; }
@@ -261,7 +281,7 @@ fn ShortenScreen(nickname: String) -> Element {
 }
 
 /// 로그인한 User의 My Links. 담은 순서의 최신순, 한 페이지 50개, "이전"/"다음"으로 넘긴다 (주소는 그대로).
-/// 각 Short Link 옆의 "삭제"는 Remove(내 링크에서 빼기)다.
+/// 각 줄은 [`MyLinkItem`]이다.
 #[component]
 fn ShortLinkList(page: Signal<u32>, version: Signal<u32>) -> Element {
     let list = use_server_future(move || {
@@ -282,19 +302,7 @@ fn ShortLinkList(page: Signal<u32>, version: Signal<u32>) -> Element {
                 } else {
                     ul {
                         for link in short_links {
-                            li { key: "{link.link_number}",
-                                a { href: "{link.short_link}", "{link.short_link}" }
-                                button {
-                                    class: "quiet",
-                                    r#type: "button",
-                                    onclick: move |_| async move {
-                                        if remove(link.link_number).await.is_ok() {
-                                            version += 1;
-                                        }
-                                    },
-                                    "삭제"
-                                }
-                            }
+                            MyLinkItem { key: "{link.link_number}", link, version }
                         }
                     }
                 }
@@ -325,6 +333,99 @@ fn ShortLinkList(page: Signal<u32>, version: Signal<u32>) -> Element {
             h2 { "내 단축 링크" }
             {content}
         }
+    }
+}
+
+/// My Links 한 줄. 첫 줄은 Link Name(없으면 Original URL)으로, 한 줄을 넘으면 …로 자르고
+/// 누르면 Original URL로 간다. 둘째 줄은 Short Link. "이름 수정"을 누르면 그 줄이 입력칸으로
+/// 바뀌고, "삭제"는 Remove(내 링크에서 빼기)다.
+#[component]
+fn MyLinkItem(link: ShortLink, version: Signal<u32>) -> Element {
+    let mut editing = use_signal(|| false);
+    let mut draft = use_signal(String::new);
+    let mut error = use_signal(|| None::<String>);
+    let link_number = link.link_number;
+    let title = link
+        .link_name
+        .clone()
+        .unwrap_or_else(|| link.original_url.clone());
+    let current_name = link.link_name.clone().unwrap_or_default();
+
+    if editing() {
+        return rsx! {
+            li {
+                form {
+                    class: "rename",
+                    onsubmit: move |e| async move {
+                        e.prevent_default();
+                        match rename(link_number, draft()).await {
+                            Ok(()) => {
+                                editing.set(false);
+                                error.set(None);
+                                version += 1;
+                            }
+                            Err(e) => error.set(Some(server_message(e))),
+                        }
+                    },
+                    input {
+                        r#type: "text",
+                        value: "{draft}",
+                        maxlength: "{MAX_LINK_NAME_CHARS}",
+                        placeholder: "{link.original_url}",
+                        oninput: move |e| draft.set(e.value()),
+                    }
+                    button { class: "quiet", r#type: "submit", "저장" }
+                    button {
+                        class: "quiet",
+                        r#type: "button",
+                        onclick: move |_| {
+                            editing.set(false);
+                            error.set(None);
+                        },
+                        "취소"
+                    }
+                }
+                if let Some(message) = error() {
+                    p { class: "error", "{message}" }
+                }
+            }
+        };
+    }
+
+    rsx! {
+        li {
+            div { class: "link",
+                a { class: "name", href: "{link.original_url}", title: "{title}", "{title}" }
+                a { class: "short", href: "{link.short_link}", "{link.short_link}" }
+            }
+            button {
+                class: "quiet",
+                r#type: "button",
+                onclick: move |_| {
+                    draft.set(current_name.clone());
+                    editing.set(true);
+                },
+                "이름 수정"
+            }
+            button {
+                class: "quiet",
+                r#type: "button",
+                onclick: move |_| async move {
+                    if remove(link_number).await.is_ok() {
+                        version += 1;
+                    }
+                },
+                "삭제"
+            }
+        }
+    }
+}
+
+/// 서버 함수 오류에서 화면에 보여 줄 문구.
+fn server_message(e: ServerFnError) -> String {
+    match e {
+        ServerFnError::ServerError { message, .. } => message,
+        _ => "서버와 통신하지 못했어요".to_string(),
     }
 }
 
@@ -519,6 +620,28 @@ pub async fn remove(link_number: i64) -> Result<(), ServerFnError> {
         dioxus::logger::tracing::error!("Remove 실패: {e}");
         server_error(StatusCode::SERVICE_UNAVAILABLE, "지금은 뺄 수 없어요")
     })
+}
+
+/// 로그인한 User가 자기 My Links에 담긴 Short Link의 Link Name을 고친다. 빈칸이면 이름을 없앤다.
+#[post("/api/rename", shortener: ShortenerExtension, headers: HeaderMap)]
+pub async fn rename(link_number: i64, link_name: String) -> Result<(), ServerFnError> {
+    let user = require_user(&shortener, &headers).await?;
+    shortener
+        .rename(&user, link_number, &link_name)
+        .await
+        .map_err(|e| match e {
+            shortener::RenameError::TooLong => server_error(
+                StatusCode::BAD_REQUEST,
+                &format!("이름은 {MAX_LINK_NAME_CHARS}자까지 붙일 수 있어요"),
+            ),
+            shortener::RenameError::Storage(e) => {
+                dioxus::logger::tracing::error!("Link Name 고치기 실패: {e}");
+                server_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "지금은 이름을 고칠 수 없어요",
+                )
+            }
+        })
 }
 
 /// `DATABASE_URL`이 없을 때 쓰는 로컬 개발용 SQLite 파일(작업 폴더의 `short-url.db`, 없으면 만든다).

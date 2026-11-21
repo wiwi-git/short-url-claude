@@ -3023,6 +3023,7 @@ dependencies = [
  "dioxus",
  "getrandom 0.3.4",
  "http-body-util",
+ "idna",
  "reqwest",
  "serde",
  "serde_json",

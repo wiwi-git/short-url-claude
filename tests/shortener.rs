@@ -6,8 +6,10 @@ mod common;
 
 use common::{shortener, TestDb};
 use short_url::shortener::{
-    OpenError, Rejection, ShortLink, ShortLinkPage, ShortenError, Shortener, Stats, User,
+    OpenError, Rejection, RenameError, ShortLink, ShortLinkPage, ShortenError, Shortener, Stats,
+    User, MAX_LINK_NAME_CHARS,
 };
+use sqlx::Connection;
 
 #[tokio::test]
 async fn shorten_then_follow_round_trips_to_the_original_url() {
@@ -600,6 +602,11 @@ async fn my_links_are_newest_first_and_do_not_repeat_reshortened_urls() {
                 .map(|n| ShortLink {
                     link_number: n,
                     short_link: format!("http://localhost:8080/{n}"),
+                    original_url: format!(
+                        "https://example.com/{}",
+                        ["a", "b", "c"][n as usize - 1]
+                    ),
+                    link_name: Some("example.com".to_string()),
                 })
                 .to_vec(),
             has_next: false,
@@ -905,5 +912,210 @@ async fn stats_count_users_and_short_links_that_still_work() {
             users: 2,
             short_links: 1
         }
+    );
+}
+
+/// 페이지의 Link Name만 순서대로.
+fn link_names(page: &ShortLinkPage) -> Vec<Option<&str>> {
+    page.short_links
+        .iter()
+        .map(|link| link.link_name.as_deref())
+        .collect()
+}
+
+#[tokio::test]
+async fn shorten_names_the_link_after_the_original_url_domain() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    let user = common::user(&shortener).await;
+    for url in [
+        "https://www.youtube.com/watch?v=1",
+        "https://blog.naver.com/someone/1",
+        "https://Example.com:8443/a",
+        "https://xn--bj0bj06e.kr/",
+        "http://192.168.0.1/admin",
+        "https://www/",
+    ] {
+        shortener.shorten(&user, url).await.unwrap();
+    }
+
+    let page = shortener.my_links(&user, 0).await.unwrap();
+
+    assert_eq!(
+        link_names(&page),
+        [
+            Some("www"),
+            Some("192.168.0.1"),
+            Some("한글.kr"),
+            Some("example.com"),
+            Some("blog.naver.com"),
+            Some("youtube.com"),
+        ],
+        "앞의 www.만 떼고, 서브도메인은 두고, 포트는 빼고, IDN은 유니코드로"
+    );
+    assert_eq!(
+        page.short_links[5].original_url,
+        "https://www.youtube.com/watch?v=1"
+    );
+}
+
+#[tokio::test]
+async fn renaming_changes_only_my_link_name_and_reshortening_keeps_it() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    let alice = shortener.sign_in(1, "앨리스").await.unwrap();
+    let bob = shortener.sign_in(2, "밥").await.unwrap();
+    shortener
+        .shorten(&alice, "https://www.notion.so/wiki")
+        .await
+        .unwrap();
+
+    shortener.rename(&alice, 1, "  회사 위키  ").await.unwrap();
+    shortener
+        .shorten(&alice, "https://www.notion.so/wiki")
+        .await
+        .unwrap();
+    shortener
+        .shorten(&bob, "https://www.notion.so/wiki")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        link_names(&shortener.my_links(&alice, 0).await.unwrap()),
+        [Some("회사 위키")],
+        "앞뒤 공백을 떼고, 다시 Shorten해도 고친 이름을 지킨다"
+    );
+    assert_eq!(
+        link_names(&shortener.my_links(&bob, 0).await.unwrap()),
+        [Some("notion.so")],
+        "같은 Short Link라도 Link Name은 User마다 따로다"
+    );
+}
+
+#[tokio::test]
+async fn renaming_to_blank_clears_the_link_name() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    let user = common::user(&shortener).await;
+    shortener
+        .shorten(&user, "https://example.com/a")
+        .await
+        .unwrap();
+
+    shortener.rename(&user, 1, "   ").await.unwrap();
+
+    assert_eq!(
+        link_names(&shortener.my_links(&user, 0).await.unwrap()),
+        [None]
+    );
+}
+
+#[tokio::test]
+async fn renaming_accepts_up_to_the_limit_and_rejects_longer_names() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    let user = common::user(&shortener).await;
+    shortener
+        .shorten(&user, "https://example.com/a")
+        .await
+        .unwrap();
+    let longest = "가".repeat(MAX_LINK_NAME_CHARS);
+
+    shortener
+        .rename(&user, 1, &format!(" {longest} "))
+        .await
+        .unwrap();
+    assert_eq!(
+        shortener.rename(&user, 1, &format!("{longest}가")).await,
+        Err(RenameError::TooLong)
+    );
+
+    assert_eq!(
+        link_names(&shortener.my_links(&user, 0).await.unwrap()),
+        [Some(longest.as_str())],
+        "거절하면 이름이 바뀌지 않는다"
+    );
+}
+
+#[tokio::test]
+async fn renaming_a_link_not_in_my_links_does_nothing() {
+    let db = TestDb::new().await;
+    let shortener = shortener(&db).await;
+    let alice = shortener.sign_in(1, "앨리스").await.unwrap();
+    let bob = shortener.sign_in(2, "밥").await.unwrap();
+    shortener
+        .shorten(&alice, "https://example.com/a")
+        .await
+        .unwrap();
+
+    shortener.rename(&bob, 1, "밥의 이름").await.unwrap();
+    shortener.rename(&bob, 99, "없는 번호").await.unwrap();
+
+    assert_eq!(
+        link_names(&shortener.my_links(&alice, 0).await.unwrap()),
+        [Some("example.com")]
+    );
+    assert!(shortener
+        .my_links(&bob, 0)
+        .await
+        .unwrap()
+        .short_links
+        .is_empty());
+}
+
+#[tokio::test]
+async fn opening_an_old_storage_names_existing_links_once() {
+    let db = TestDb::new().await;
+    {
+        let mut conn = sqlx::SqliteConnection::connect(&db.url_creating())
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE short_links (
+                 link_number  INTEGER PRIMARY KEY,
+                 original_url TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE link_number_issuer (
+                 only_row    INTEGER PRIMARY KEY DEFAULT 1 CHECK (only_row = 1),
+                 last_issued INTEGER NOT NULL
+             );
+             INSERT INTO link_number_issuer (only_row, last_issued) VALUES (1, 2);
+             CREATE TABLE users (
+                 id         INTEGER PRIMARY KEY,
+                 kakao_id   INTEGER NOT NULL UNIQUE,
+                 nickname   TEXT NOT NULL,
+                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
+             );
+             INSERT INTO users (id, kakao_id, nickname) VALUES (1, 1, '앨리스');
+             CREATE TABLE my_links (
+                 user_id     INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+                 link_number INTEGER NOT NULL REFERENCES short_links (link_number) ON DELETE CASCADE,
+                 PRIMARY KEY (user_id, link_number)
+             );
+             INSERT INTO short_links VALUES (1, 'https://www.youtube.com/a'), (2, 'https://blog.naver.com/b');
+             INSERT INTO my_links VALUES (1, 1), (1, 2);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    }
+    let alice = User {
+        id: 1,
+        nickname: "앨리스".to_string(),
+    };
+
+    let first = shortener(&db).await;
+    assert_eq!(
+        link_names(&first.my_links(&alice, 0).await.unwrap()),
+        [Some("blog.naver.com"), Some("youtube.com")]
+    );
+    first.rename(&alice, 1, "").await.unwrap();
+    drop(first);
+
+    let again = shortener(&db).await;
+    assert_eq!(
+        link_names(&again.my_links(&alice, 0).await.unwrap()),
+        [Some("blog.naver.com"), None],
+        "두 번째로 열 때는 지운 이름을 다시 채우지 않는다"
     );
 }

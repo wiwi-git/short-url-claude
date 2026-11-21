@@ -32,6 +32,10 @@ _Avoid_: member, account, owner
 한 User가 Shorten한 Short Link 모음. 같은 Short Link가 여러 User의 My Links에 함께 담길 수 있다.
 _Avoid_: owned links, my list
 
+**Link Name** (링크 이름):
+User가 자기 My Links에 담긴 Short Link에 붙인 이름. 처음 담을 때 Original URL의 도메인(앞의 `www.`를 뗀 것)으로 채워지고, User가 언제든 바꾸거나 비울 수 있다. 같은 Short Link라도 User마다 따로 갖고, 다시 Shorten해도 바뀌지 않는다. 비어 있으면 그 자리에 Original URL을 보여 준다.
+_Avoid_: site name, title, label, alias
+
 **Remove** (내 링크에서 빼기):
 User가 자기 My Links에서 Short Link를 빼는 일. 그 Short Link를 담은 User가 더는 없으면 Short Link도 지워지고 Follow하면 404가 된다.
 _Avoid_: delete (Short Link 자체를 지우는 것처럼 들린다)
