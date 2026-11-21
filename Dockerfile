@@ -19,7 +19,7 @@ COPY --from=builder /app/bundle/server /app/server
 COPY --from=builder /app/bundle/public /app/public
 
 # Dioxus 서버는 IP·PORT 환경 변수로 주소를 정한다. 기본 IP가 127.0.0.1이라 컨테이너 밖에서 닿도록 0.0.0.0으로 연다.
-# BASE_URL, DATABASE_URL(SQLite 파일 주소, 예: sqlite:///data/short-url.db), 카카오 키 두 개는 배포 환경에서 설정한다(deploy/compose.yaml).
+# BASE_URL, DATABASE_URL(SQLite 파일 주소, 예: sqlite:///data/short-url.db), 카카오 키 두 개는 배포 환경에서 설정한다(deploy/k8s/deployment.yaml).
 # SQLite는 바이너리에 묶여 있고, 카카오 API의 TLS는 rustls와 내장 루트 인증서를 쓰므로 시스템 패키지가 필요 없다.
 ENV IP=0.0.0.0 \
     PORT=8080
